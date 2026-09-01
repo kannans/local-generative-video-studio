@@ -206,6 +206,9 @@ overridden with environment variables or a `.env` file in the repository root.
 | `COMFYUI_PYTHON` | `$COMFYUI_DIR/.venv/bin/python` | Python interpreter from the ComfyUI environment |
 | `COMFYUI_HOST` | `127.0.0.1` | Host used for the managed ComfyUI process |
 | `COMFYUI_PORT` | `8188` | Port used for the managed ComfyUI process |
+| `FRONTEND_DIR` | `frontend` | Next.js application directory |
+| `FRONTEND_HOST` | `127.0.0.1` | Host used for the managed frontend process |
+| `FRONTEND_PORT` | `3000` | Port used for the managed frontend process |
 
 The default video format is `746x420` at 24 fps. Portrait video can be selected
 with `VIDEO_WIDTH=420` and `VIDEO_HEIGHT=746`.
@@ -222,8 +225,9 @@ Start the development server with hot reload:
 ```
 
 `start_server.sh` starts ComfyUI when it is not already running, waits until its
-`/system_stats` endpoint is ready, and then starts the FastAPI server. Configure
-a non-default ComfyUI checkout or interpreter for that invocation:
+`/system_stats` endpoint is ready, starts the Next.js frontend, and then starts
+the FastAPI server. Configure a non-default ComfyUI checkout or interpreter for
+that invocation:
 
 ```sh
 COMFYUI_DIR="$HOME/src/ComfyUI" COMFYUI_PYTHON="$HOME/src/ComfyUI/.venv/bin/python" ./scripts/start_server.sh
@@ -236,7 +240,8 @@ that existing process without taking ownership of it. The FastAPI command is:
 uv run uvicorn backend.api.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-The service is available at <http://127.0.0.1:8000>.
+The web studio is available at <http://127.0.0.1:3000>; the FastAPI service is
+available at <http://127.0.0.1:8000>.
 
 Stop the server from another terminal with:
 
@@ -244,8 +249,63 @@ Stop the server from another terminal with:
 ./scripts/stop_server.sh
 ```
 
-When running the server in the foreground, `Ctrl+C` also performs a clean
-shutdown.
+Use `stop_server.sh` to stop all managed processes. When running the server in
+the foreground, `Ctrl+C` stops the FastAPI process; run `stop_server.sh` to also
+stop managed ComfyUI and frontend processes.
+
+## Phase 4 Web Studio
+
+The frontend is a Next.js App Router application in `frontend/`. It provides a
+responsive dark workspace with project history, backend connection state, a
+multiline generation prompt, reference-image selection, 16:9 and 9:16 output
+selection, generation progress, and completed-video cards.
+
+Completed-video cards include custom playback controls, looping, a scrubber,
+timestamp display, MP4 download, and a paused-frame brush overlay. Brush
+strokes are stored as normalized canvas-mask data in the browser and are ready
+to be submitted to the Phase 3 inpainting pipeline when that API endpoint is
+connected.
+
+Install the frontend dependencies after cloning the repository:
+
+```sh
+cd frontend
+npm install
+```
+
+For frontend-only development, start Next.js directly:
+
+```sh
+cd frontend
+npm run dev
+```
+
+Use `./scripts/start_server.sh` for the normal integrated development workflow;
+it manages ComfyUI, Next.js, and FastAPI together.
+
+### WebSocket Contract
+
+The frontend connects to `ws://localhost:8000/ws/generation` and sends a
+generation request like this:
+
+```json
+{
+	"prompt": "A cinematic mountain landscape at sunrise",
+	"aspect_ratio": "16:9",
+	"reference_name": "optional-reference.png"
+}
+```
+
+It renders progress from `progress`, `status`, `message`, and `node` fields.
+It also accepts future preview events with `type: "preview"` and `preview_url`,
+and completion events with `type: "complete"` or `type: "completion"` plus a
+`video_url` or `mp4_url` field.
+
+The current FastAPI WebSocket is still a Phase 1 readiness skeleton: it returns
+`queued` and `not_implemented` progress messages but does not yet dispatch a
+Phase 3 render or send an MP4 URL. The frontend remains usable for prompt and
+connection-state interaction; wire the generation worker to the WebSocket to
+enable live video cards.
 
 ## HTTP API
 
@@ -292,8 +352,13 @@ backend/
 		exports/              Final exports
 scripts/
 	setup_env.sh            Initialize, install, and verify MPS
-	start_server.sh         Start the local uvicorn development server
-	stop_server.sh          Stop the local uvicorn process
+	start_server.sh         Start managed ComfyUI, frontend, and FastAPI services
+	stop_server.sh          Stop managed ComfyUI, frontend, and FastAPI services
+frontend/
+	src/app/                Next.js App Router studio shell and styles
+	src/components/player/  Video controls and canvas brush overlay
+	src/hooks/              WebSocket transport hook
+	src/lib/store.ts        Zustand studio, playback, and mask state
 pyproject.toml            Project metadata and dependencies
 uv.lock                   Reproducible dependency lockfile
 ```

@@ -3,6 +3,7 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMFYUI_PID_FILE="$PROJECT_ROOT/backend/storage/comfyui.pid"
+FRONTEND_PID_FILE="$PROJECT_ROOT/backend/storage/frontend.pid"
 
 if pgrep -f 'uvicorn backend.api.main:app' >/dev/null 2>&1; then
   pkill -TERM -f 'uvicorn backend.api.main:app'
@@ -18,4 +19,13 @@ if [[ -f "$COMFYUI_PID_FILE" ]]; then
     printf '%s\n' "Managed ComfyUI process stopped."
   fi
   rm -f "$COMFYUI_PID_FILE"
+fi
+
+if [[ -f "$FRONTEND_PID_FILE" ]]; then
+  frontend_pid="$(<"$FRONTEND_PID_FILE")"
+  if kill -0 "$frontend_pid" 2>/dev/null; then
+    kill -TERM "$frontend_pid"
+    printf '%s\n' "Managed frontend process stopped."
+  fi
+  rm -f "$FRONTEND_PID_FILE"
 fi
