@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from pathlib import Path
 from uuid import uuid4
@@ -36,7 +37,7 @@ class VideoContinuationEngine:
         workflow["7"]["inputs"]["latent_image"] = ["6", 0]
         return workflow
 
-    async def continue_video(self, previous: GeneratedVideo, request: VideoGenerationRequest, run_id: str | None = None) -> GeneratedVideo:
+    async def continue_video(self, previous: GeneratedVideo, request: VideoGenerationRequest, run_id: str | None = None, progress_callback: Callable[[object], Awaitable[None]] | None = None) -> GeneratedVideo:
         """Create a five-second continuation retaining the previous segment's visual state."""
         continuation = replace(request, frames=request.fps * 5)
         frame = self.extract_final_frame(previous.video_path)
@@ -44,9 +45,10 @@ class VideoContinuationEngine:
         client = self.text_to_video.client
         workflow = self.build_workflow(continuation, await client.upload_input(frame), resolved_run_id)
         prompt_id, client_id = await client.submit_workflow(workflow)
-        async for _ in client.monitor_workflow(prompt_id, client_id):
-            pass
-        files = tuple(await client.save_outputs(prompt_id, self.text_to_video._run_directory(resolved_run_id)))
+        async for event in client.monitor_workflow(prompt_id, client_id):
+            if progress_callback is not None:
+                await progress_callback(event)
+        files = tuple(await client.save_outputs(prompt_id, self.text_to_video.settings.exports_dir))
         latent = self.text_to_video.store_latent(
             self.text_to_video._required_artifact(files, {".latent", ".safetensors"}, "latent"), resolved_run_id
         )

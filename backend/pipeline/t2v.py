@@ -6,6 +6,7 @@ import asyncio
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -39,8 +40,8 @@ class VideoGenerationRequest:
     def __post_init__(self) -> None:
         if not self.prompt.strip():
             raise ValueError("prompt must not be empty")
-        if not 96 <= self.frames <= 144:
-            raise ValueError("frames must be between 96 and 144")
+        if not 1 <= self.frames <= 144:
+            raise ValueError("frames must be between 1 and 144")
         if self.width < 16 or self.height < 16:
             raise ValueError("video dimensions must be at least 16 pixels")
         if self.width % 2 or self.height % 2:
@@ -89,25 +90,26 @@ class TextToVideoEngine:
         }
         return workflow
 
-    async def generate(self, request: VideoGenerationRequest, run_id: str | None = None) -> GeneratedVideo:
+    async def generate(self, request: VideoGenerationRequest, run_id: str | None = None, progress_callback: Callable[[Any], Awaitable[None]] | None = None) -> GeneratedVideo:
         """Run a 4-6 second text-to-video generation and persist its artifacts."""
         resolved_run_id = run_id or uuid4().hex
         workflow = self.build_workflow(request, resolved_run_id)
         prompt_id, client_id = await self.client.submit_workflow(workflow)
-        async for _ in self.client.monitor_workflow(prompt_id, client_id):
-            pass
-        files = tuple(await self.client.save_outputs(prompt_id, self._run_directory(resolved_run_id)))
+        async for event in self.client.monitor_workflow(prompt_id, client_id):
+            if progress_callback is not None:
+                await progress_callback(event)
+        files = tuple(await self.client.save_outputs(prompt_id, self.settings.exports_dir))
         video_path = self._required_artifact(files, {".mp4", ".mov", ".mkv"}, "video")
         latent_path = self.store_latent(
             self._required_artifact(files, {".latent", ".safetensors"}, "latent"), resolved_run_id
         )
         return GeneratedVideo(resolved_run_id, prompt_id, video_path, latent_path, files, request)
 
-    async def run_and_wait(self, request: VideoGenerationRequest, run_id: str | None = None) -> GeneratedVideo:
+    async def run_and_wait(self, request: VideoGenerationRequest, run_id: str | None = None, progress_callback: Callable[[Any], Awaitable[None]] | None = None) -> GeneratedVideo:
         """Run generation after verifying that the configured VideoHelperSuite node exists."""
         if shutil.which("ffmpeg") is None:
             raise RuntimeError("ffmpeg is required to encode ComfyUI video output")
-        return await self.generate(request, run_id)
+        return await self.generate(request, run_id, progress_callback)
 
     def _run_directory(self, run_id: str) -> Path:
         if not run_id or Path(run_id).name != run_id:

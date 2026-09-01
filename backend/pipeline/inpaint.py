@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -45,7 +46,7 @@ class SpatialInpaintEngine:
         })
         return workflow
 
-    async def inpaint(self, source_video: Path, mask: Path, request: VideoGenerationRequest, run_id: str) -> GeneratedVideo:
+    async def inpaint(self, source_video: Path, mask: Path, request: VideoGenerationRequest, run_id: str, progress_callback: Callable[[object], Awaitable[None]] | None = None) -> GeneratedVideo:
         """Upload source and mask, then render only the masked latent region."""
         if not source_video.is_file() or not mask.is_file():
             raise FileNotFoundError("source_video and mask must both exist")
@@ -53,9 +54,10 @@ class SpatialInpaintEngine:
         source_name, mask_name = await client.upload_input(source_video), await client.upload_input(mask)
         workflow = self.build_workflow(source_name, mask_name, request, run_id)
         prompt_id, client_id = await client.submit_workflow(workflow)
-        async for _ in client.monitor_workflow(prompt_id, client_id):
-            pass
-        files = tuple(await client.save_outputs(prompt_id, self.text_to_video._run_directory(run_id)))
+        async for event in client.monitor_workflow(prompt_id, client_id):
+            if progress_callback is not None:
+                await progress_callback(event)
+        files = tuple(await client.save_outputs(prompt_id, self.text_to_video.settings.exports_dir))
         video = self.text_to_video._required_artifact(files, {".mp4", ".mov", ".mkv"}, "video")
         latent = self.text_to_video.store_latent(
             self.text_to_video._required_artifact(files, {".latent", ".safetensors"}, "latent"), run_id

@@ -135,6 +135,16 @@ class ComfyUIClient:
             raise ComfyUIClientError(f"ComfyUI returned an invalid upload response: {body}") from error
         return f"{subfolder}/{name}".lstrip("/") if subfolder else str(name)
 
+    async def interrupt(self) -> None:
+        """Request that ComfyUI interrupt its currently executing workflow."""
+        async with aiohttp.ClientSession(timeout=self.timeout) as session:
+            await self._request_no_content(session, "POST", "/interrupt")
+
+    async def clear_queue(self) -> None:
+        """Remove all workflows waiting in ComfyUI's execution queue."""
+        async with aiohttp.ClientSession(timeout=self.timeout) as session:
+            await self._request_no_content(session, "POST", "/queue", {"clear": True})
+
     async def save_outputs(self, prompt_id: str, destination: Path) -> list[Path]:
         """Retrieve workflow files and persist them below a local destination directory."""
         outputs = await self.retrieve_outputs(prompt_id)
@@ -150,11 +160,46 @@ class ComfyUIClient:
         return saved_paths
 
     async def _post_prompt(self, session: aiohttp.ClientSession, payload: dict[str, Any]) -> str:
+        await self._validate_workflow_models(session, payload["prompt"])
         data = await self._request_json(session, "POST", "/prompt", json_payload=payload)
         prompt_id = data.get("prompt_id")
         if not isinstance(prompt_id, str) or not prompt_id:
             raise ComfyUIClientError(f"ComfyUI did not return a prompt_id: {data}")
         return prompt_id
+
+    async def _validate_workflow_models(
+        self, session: aiohttp.ClientSession, workflow: dict[str, Any]
+    ) -> None:
+        """Fail early when a workflow names models unavailable to ComfyUI."""
+        object_info = await self._request_json(session, "GET", "/object_info")
+        loader_inputs = {
+            "UNETLoader": "unet_name",
+            "CLIPLoader": "clip_name",
+            "VAELoader": "vae_name",
+        }
+        for node in workflow.values():
+            if not isinstance(node, dict):
+                continue
+            class_type = node.get("class_type")
+            if not isinstance(class_type, str):
+                continue
+            input_name = loader_inputs.get(class_type)
+            inputs = node.get("inputs")
+            if input_name is None or not isinstance(inputs, dict):
+                continue
+            requested_model = inputs.get(input_name)
+            if not isinstance(requested_model, str):
+                continue
+            try:
+                available_models = object_info[class_type]["input"]["required"][input_name][0]
+            except (KeyError, IndexError, TypeError) as error:
+                raise ComfyUIClientError(f"ComfyUI did not expose {class_type}.{input_name}") from error
+            if requested_model not in available_models:
+                model_kind = input_name.removesuffix("_name")
+                raise ComfyUIClientError(
+                    f"ComfyUI cannot load {model_kind} '{requested_model}'. "
+                    f"Available {model_kind} files: {', '.join(available_models) or '(none)'}."
+                )
 
     async def _monitor(
         self, session: aiohttp.ClientSession, prompt_id: str, client_id: str
@@ -171,7 +216,7 @@ class ComfyUIClient:
                     if event is None:
                         continue
                     yield event
-                    if event.event_type == "execution_error":
+                    if event.event_type in {"execution_error", "execution_interrupted"}:
                         raise ComfyUIClientError(event.message or "ComfyUI workflow failed")
                     if event.event_type == "execution_success":
                         return
@@ -195,8 +240,9 @@ class ComfyUIClient:
             return ComfyProgressEvent(prompt_id, event_type, node_id, data.get("value"), data.get("max"))
         if event_type == "executing" and data.get("node") is None:
             return ComfyProgressEvent(prompt_id, "execution_success")
-        if event_type == "execution_error":
-            return ComfyProgressEvent(prompt_id, event_type, node_id, message=str(data.get("exception_message", "Workflow failed")))
+        if event_type in {"execution_error", "execution_interrupted"}:
+            message = "Generation interrupted" if event_type == "execution_interrupted" else str(data.get("exception_message", "Workflow failed"))
+            return ComfyProgressEvent(prompt_id, event_type, node_id, message=message)
         if event_type in {"execution_start", "executing", "executed", "execution_cached"}:
             return ComfyProgressEvent(prompt_id, event_type, node_id)
         return None
@@ -278,3 +324,14 @@ class ComfyUIClient:
         if not isinstance(decoded, dict):
             raise ComfyUIClientError("ComfyUI JSON response must be an object")
         return decoded
+
+    async def _request_no_content(
+        self, session: aiohttp.ClientSession, method: str, path: str, json_payload: dict[str, Any] | None = None
+    ) -> None:
+        try:
+            async with session.request(method, f"{self.base_url}{path}", json=json_payload) as response:
+                body = await response.text()
+                if response.status >= 400:
+                    raise ComfyUIClientError(f"ComfyUI returned HTTP {response.status}: {body}")
+        except aiohttp.ClientError as error:
+            raise ComfyUIClientError(f"Could not reach ComfyUI at {self.base_url}: {error}") from error

@@ -6,9 +6,11 @@ The local generative video studio runs on Apple Silicon. It provides:
 - Pydantic-based application settings
 - Automatic local storage directory creation
 - A health endpoint with runtime, accelerator, disk, and video configuration
-- A WebSocket endpoint for generation task progress events
-- Phase 3 ComfyUI workflows for text-to-video, continuation, spatial inpainting,
-  and VideoToolbox-accelerated composition
+- Asynchronous FastAPI routes for generation, continuation, and inpainting
+- Live ComfyUI progress streamed to the web studio over WebSocket
+- Draft and Final generation presets for local iteration and output rendering
+- MP4 export serving, queue cancellation, temporary-frame cleanup, and an
+  all-in-one local launcher
 
 ## Requirements
 
@@ -64,7 +66,7 @@ uv venv --python 3.11
 uv pip install --python .venv/bin/python -r requirements.txt
 
 if [ -f manager_requirements.txt ]; then
-	uv pip install --python .venv/bin/python -r manager_requirements.txt
+  uv pip install --python .venv/bin/python -r manager_requirements.txt
 fi
 ```
 
@@ -91,15 +93,15 @@ MP4 workflow outputs.
 cd ~/projects/AIML/ComfyUI/custom_nodes
 
 if [ ! -d ComfyUI-VideoHelperSuite ]; then
-	git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git
+  git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git
 fi
 
 cd ComfyUI-VideoHelperSuite
 
 if [ -f requirements.txt ]; then
-	uv pip install \
-		--python ~/projects/AIML/ComfyUI/.venv/bin/python \
-		-r requirements.txt
+  uv pip install \
+    --python ~/projects/AIML/ComfyUI/.venv/bin/python \
+    -r requirements.txt
 fi
 ```
 
@@ -149,18 +151,18 @@ uv run python - <<'PY'
 import json
 
 with open("/tmp/comfy-object-info.json") as file:
-	nodes = json.load(file)
+    nodes = json.load(file)
 
 for node_name, field in (
-	("UNETLoader", "unet_name"),
-	("CLIPLoader", "clip_name"),
-	("VAELoader", "vae_name"),
-	("VHS_VideoCombine", "format"),
-	("VHS_LoadVideo", "video"),
+    ("UNETLoader", "unet_name"),
+    ("CLIPLoader", "clip_name"),
+    ("VAELoader", "vae_name"),
+    ("VHS_VideoCombine", "format"),
+    ("VHS_LoadVideo", "video"),
 ):
-	node = nodes.get(node_name)
-	value = "MISSING" if node is None else node["input"]["required"][field][0]
-	print(f"{node_name}.{field}: {value}")
+    node = nodes.get(node_name)
+    value = "MISSING" if node is None else node["input"]["required"][field][0]
+    print(f"{node_name}.{field}: {value}")
 PY
 ```
 
@@ -216,7 +218,31 @@ with `VIDEO_WIDTH=420` and `VIDEO_HEIGHT=746`.
 The API creates all four storage directories during application startup. No
 model checkpoints or generated media are included in Phase 1.
 
-## Run The API
+## Run The Studio
+
+Start ComfyUI once with the managed server script:
+
+```sh
+./scripts/start_server.sh
+```
+
+For subsequent integrated runs, use the all-in-one launcher:
+
+```sh
+./run_local_studio.sh
+```
+
+The launcher verifies or starts Ollama, verifies ComfyUI on port 8188, and
+starts FastAPI and Next.js only when they are not already healthy. It follows
+new entries in `backend/storage/comfyui.log`, so model loading, sampler progress,
+encoding, backend job IDs, failures, and export paths are visible in one
+terminal. Press `Ctrl+C` to stop processes owned by that launcher; pre-existing
+healthy services are reused and left running.
+
+The studio is available at <http://127.0.0.1:3000>, FastAPI at
+<http://127.0.0.1:8000>, and ComfyUI at <http://127.0.0.1:8188>.
+
+### Development Launcher
 
 Start the development server with hot reload:
 
@@ -253,12 +279,13 @@ Use `stop_server.sh` to stop all managed processes. When running the server in
 the foreground, `Ctrl+C` stops the FastAPI process; run `stop_server.sh` to also
 stop managed ComfyUI and frontend processes.
 
-## Phase 4 Web Studio
+## Phase 5 Web Studio
 
 The frontend is a Next.js App Router application in `frontend/`. It provides a
 responsive dark workspace with project history, backend connection state, a
 multiline generation prompt, reference-image selection, 16:9 and 9:16 output
-selection, generation progress, and completed-video cards.
+selection, generation progress, completed-video cards, active-render
+cancellation, and pending-queue clearing.
 
 Completed-video cards include custom playback controls, looping, a scrubber,
 timestamp display, MP4 download, and a paused-frame brush overlay. Brush
@@ -290,22 +317,32 @@ generation request like this:
 
 ```json
 {
-	"prompt": "A cinematic mountain landscape at sunrise",
-	"aspect_ratio": "16:9",
-	"reference_name": "optional-reference.png"
+  "prompt": "A cinematic mountain landscape at sunrise",
+  "aspect_ratio": "16:9",
+  "quality": "draft",
+  "reference_name": "optional-reference.png"
 }
 ```
 
-It renders progress from `progress`, `status`, `message`, and `node` fields.
-It also accepts future preview events with `type: "preview"` and `preview_url`,
-and completion events with `type: "complete"` or `type: "completion"` plus a
-`video_url` or `mp4_url` field.
+The backend submits the workflow to ComfyUI asynchronously and streams
+`accepted`, `progress`, `complete`, `error`, and `cancelled` events. Progress
+events contain `job_id`, `progress`, `status`, `message`, and `node`. A complete
+event includes the generated `run_id` and a `video_url` beneath `/exports`.
 
-The current FastAPI WebSocket is still a Phase 1 readiness skeleton: it returns
-`queued` and `not_implemented` progress messages but does not yet dispatch a
-Phase 3 render or send an MP4 URL. The frontend remains usable for prompt and
-connection-state interaction; wire the generation worker to the WebSocket to
-enable live video cards.
+The web studio uses Draft mode by default. Draft renders were verified locally
+at approximately 38 seconds after model warm-up, compared with roughly 11
+minutes for a 96-frame two-step render on the same M4 Pro.
+
+### Quality Presets
+
+| Preset | Resolution | Frames | FPS | Steps | CFG |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `draft` | `384x216` | 17 | 6 | 2 | 4.0 |
+| `final` | `746x420` | 121 | 24 | 20 | 5.5 |
+
+Portrait requests swap the preset width and height. API callers may override
+`frames`, `fps`, `steps`, and `cfg`; the studio UI sends Draft mode to keep local
+iteration responsive.
 
 ## HTTP API
 
@@ -321,6 +358,52 @@ The JSON response includes the service status, timestamp, Python and PyTorch
 versions, MPS availability, disk capacity, storage paths, video settings, and
 the configured Ollama URL.
 
+### `POST /generate`
+
+Queue a Draft render without blocking the HTTP response:
+
+```sh
+curl --fail --silent --show-error \
+  -X POST http://127.0.0.1:8000/generate \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "prompt": "A bright red paper boat drifting through a rain puddle",
+    "negative_prompt": "blurry, distorted, text, watermark",
+    "aspect_ratio": "16:9",
+    "quality": "draft",
+    "seed": 73
+  }'
+```
+
+The response is `202 Accepted` with a platform job ID. Completed videos and
+latents are written beneath `backend/storage/exports/<job-id>/`, while a latent
+copy for continuation is stored beneath `backend/storage/latents/<job-id>/`.
+
+### `POST /extend` And `POST /inpaint`
+
+`/extend` dispatches image-conditioned continuation through `pipeline/i2v.py`.
+It accepts the generation fields plus `previous_run_id`. `/inpaint` dispatches
+spatial inpainting through `pipeline/inpaint.py` and accepts the generation
+fields plus export-relative `source_video` and `mask` paths.
+
+### Queue Controls
+
+Cancel the active ComfyUI workflow:
+
+```sh
+curl --fail --silent --show-error -X POST \
+  http://127.0.0.1:8000/generation/cancel
+```
+
+Clear workflows waiting behind the active render:
+
+```sh
+curl --fail --silent --show-error -X POST \
+  http://127.0.0.1:8000/generation/clear-queue
+```
+
+The Ban and List-X buttons in the studio header expose the same controls.
+
 ### `WS /ws/generation`
 
 Connect to:
@@ -329,36 +412,58 @@ Connect to:
 ws://127.0.0.1:8000/ws/generation
 ```
 
-Send a JSON generation request. The current Phase 1 skeleton responds with a
-queued progress event followed by a worker-readiness event. For example:
+Send the same generation JSON used by `/generate`. The connection remains open
+and carries real-time ComfyUI progress followed by completion or error events.
+For example:
 
 ```json
-{"prompt":"A cinematic mountain landscape at sunrise"}
+{"prompt":"A cinematic mountain landscape at sunrise","quality":"draft","aspect_ratio":"16:9"}
 ```
 
-The endpoint keeps the connection open for subsequent requests. The generation
-worker and media pipeline will be connected in a later phase.
+### Exported Media
+
+FastAPI mounts `backend/storage/exports` at `/exports`. A completed video is
+available at a URL such as:
+
+```text
+http://127.0.0.1:8000/exports/<job-id>/video_00001.mp4
+```
+
+### Temporary Frame Cleanup
+
+Remove temporary frame batches older than 24 hours without touching final MP4
+exports, latents, or session metadata:
+
+```sh
+uv run python -m backend.storage.cleaner
+```
+
+Python callers can use `purge_orphaned_frame_batches(max_age_hours=24)` to
+choose another retention period.
 
 ## Project Layout
 
 ```text
 backend/
-	api/main.py             FastAPI app, health route, and WebSocket route
-	config.py               Pydantic Settings and storage paths
-	storage/
-		model_checkpoints/    Model checkpoint files
-		temp_frames/          Temporary frame scratchpad
-		latents/              Session latent files
-		exports/              Final exports
+  api/main.py             FastAPI app, lifespan, health, and export mount
+  api/routes.py           Async generation routes, dispatcher, and queue controls
+  config.py               Pydantic Settings and storage paths
+  storage/
+    cleaner.py            Stale temporary-frame cleanup
+    model_checkpoints/    Model checkpoint files
+    temp_frames/          Temporary frame scratchpad
+    latents/              Session latent files
+    exports/              Final exports
 scripts/
-	setup_env.sh            Initialize, install, and verify MPS
-	start_server.sh         Start managed ComfyUI, frontend, and FastAPI services
-	stop_server.sh          Stop managed ComfyUI, frontend, and FastAPI services
+  setup_env.sh            Initialize, install, and verify MPS
+  start_server.sh         Start managed ComfyUI, frontend, and FastAPI services
+  stop_server.sh          Stop managed ComfyUI, frontend, and FastAPI services
+run_local_studio.sh       Reuse/start services and stream local logs
 frontend/
-	src/app/                Next.js App Router studio shell and styles
-	src/components/player/  Video controls and canvas brush overlay
-	src/hooks/              WebSocket transport hook
-	src/lib/store.ts        Zustand studio, playback, and mask state
+  src/app/                Next.js App Router studio shell and styles
+  src/components/player/  Video controls and canvas brush overlay
+  src/hooks/              WebSocket transport hook
+  src/lib/store.ts        Zustand studio, playback, and mask state
 pyproject.toml            Project metadata and dependencies
 uv.lock                   Reproducible dependency lockfile
 ```
@@ -377,3 +482,25 @@ If port 8000 is already occupied, use another port:
 ```sh
 uv run uvicorn backend.api.main:app --reload --host 127.0.0.1 --port 8001
 ```
+
+If a job remains at 0%, follow ComfyUI's native log. The first percentage is
+emitted only after the first sampler step completes:
+
+```sh
+tail -f backend/storage/comfyui.log
+```
+
+Verify the queue independently:
+
+```sh
+curl --fail --silent http://127.0.0.1:8188/queue
+```
+
+VideoHelperSuite warnings that default `pix_fmt` to `yuv420p`, `crf` to 19,
+metadata to true, and audio trimming to false are informational. A successful
+render ends with `Prompt executed in ...`, an empty queue, and an MP4 beneath
+the matching export directory.
+
+If ComfyUI reports `SafetensorError: incomplete metadata, file not fully
+covered`, the referenced model download is truncated. Delete and re-download
+that model, verify its remote content length, and restart ComfyUI.

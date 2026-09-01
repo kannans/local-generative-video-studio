@@ -7,9 +7,11 @@ from datetime import UTC, datetime
 from typing import AsyncIterator
 
 import torch
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
+from backend.api.routes import dispatcher, router
 from backend.config import settings
 
 
@@ -24,6 +26,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     for directory in settings.storage_directories:
         directory.mkdir(parents=True, exist_ok=True)
     yield
+    await dispatcher.close()
 
 
 app = FastAPI(
@@ -38,6 +41,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(router)
+app.mount("/exports", StaticFiles(directory=settings.exports_dir), name="exports")
 
 
 @app.get("/health")
@@ -69,30 +74,3 @@ async def health() -> dict[str, object]:
         },
         "ollama_api_url": settings.ollama_api_url,
     }
-
-
-@app.websocket("/ws/generation")
-async def generation_websocket(websocket: WebSocket) -> None:
-    """Accept generation requests and stream progress events."""
-    await websocket.accept()
-    try:
-        while True:
-            request = await websocket.receive_json()
-            await websocket.send_json(
-                {
-                    "type": "progress",
-                    "status": "queued",
-                    "progress": 0,
-                    "request": request,
-                }
-            )
-            await websocket.send_json(
-                {
-                    "type": "progress",
-                    "status": "not_implemented",
-                    "progress": 0,
-                    "message": "Generation worker is ready to be connected.",
-                }
-            )
-    except WebSocketDisconnect:
-        return

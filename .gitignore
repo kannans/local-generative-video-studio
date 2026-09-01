@@ -12,3 +12,8 @@ wheels/
 # Local ComfyUI runtime state
 backend/storage/*.log
 backend/storage/*.pid
+backend/storage/exports/
+backend/storage/latents/
+backend/storage/model_checkpoints/
+backend/storage/temp_frames/
+.DS_Store
