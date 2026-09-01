@@ -320,6 +320,13 @@ generation request like this:
   "prompt": "A cinematic mountain landscape at sunrise",
   "aspect_ratio": "16:9",
   "quality": "draft",
+  "width": 512,
+  "height": 288,
+  "frames": 49,
+  "steps": 12,
+  "cfg": 5.0,
+  "fps": 16,
+  "seed": 73,
   "reference_name": "optional-reference.png"
 }
 ```
@@ -329,20 +336,26 @@ The backend submits the workflow to ComfyUI asynchronously and streams
 events contain `job_id`, `progress`, `status`, `message`, and `node`. A complete
 event includes the generated `run_id` and a `video_url` beneath `/exports`.
 
-The web studio uses Draft mode by default. Draft renders were verified locally
-at approximately 38 seconds after model warm-up, compared with roughly 11
-minutes for a 96-frame two-step render on the same M4 Pro.
+The web studio defaults to the tested 512x288 profile. It completed in 410.58
+seconds (about 7 minutes) on the M4 Pro. The composer shows an estimated render
+time, and the Studio Settings button allows resolution, frame count, sampling
+steps, CFG, FPS, and seed to be changed before submitting a prompt. The estimate
+scales from that local benchmark using resolution, frames, and steps; model
+warm-up and memory pressure can make actual time vary.
 
 ### Quality Presets
 
 | Preset | Resolution | Frames | FPS | Steps | CFG |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `draft` | `384x216` | 17 | 6 | 2 | 4.0 |
+| `draft` | `512x288` | 49 | 16 | 12 | 5.0 |
 | `final` | `746x420` | 121 | 24 | 20 | 5.5 |
 
 Portrait requests swap the preset width and height. API callers may override
-`frames`, `fps`, `steps`, and `cfg`; the studio UI sends Draft mode to keep local
-iteration responsive.
+`width`, `height`, `frames`, `fps`, `steps`, `cfg`, and `seed`; the studio UI
+sends its current settings with every request. Backend Draft defaults can also
+be changed in `.env` with `GENERATION_WIDTH`, `GENERATION_HEIGHT`,
+`GENERATION_FRAMES`, `GENERATION_STEPS`, `GENERATION_CFG`, `GENERATION_FPS`, and
+`GENERATION_SEED`.
 
 ## HTTP API
 
@@ -371,6 +384,12 @@ curl --fail --silent --show-error \
     "negative_prompt": "blurry, distorted, text, watermark",
     "aspect_ratio": "16:9",
     "quality": "draft",
+    "width": 512,
+    "height": 288,
+    "frames": 49,
+    "steps": 12,
+    "cfg": 5.0,
+    "fps": 16,
     "seed": 73
   }'
 ```

@@ -31,7 +31,9 @@ class GenerationPayload(BaseModel):
     aspect_ratio: Literal["16:9", "9:16"] = "16:9"
     quality: Literal["draft", "final"] = "draft"
     model: Literal["wan-2.1", "ltx-video"] = "wan-2.1"
-    seed: int = 0
+    seed: int = Field(default=settings.generation_seed, ge=0)
+    width: int | None = Field(default=None, ge=16)
+    height: int | None = Field(default=None, ge=16)
     frames: int | None = Field(default=None, ge=1, le=144)
     fps: int | None = Field(default=None, gt=0)
     steps: int | None = Field(default=None, gt=0)
@@ -39,11 +41,14 @@ class GenerationPayload(BaseModel):
 
     def to_request(self) -> VideoGenerationRequest:
         if self.quality == "draft":
-            width, height = 384, 216
-            frames, fps, steps, cfg = 17, 6, 2, 4.0
+            width, height = settings.generation_width, settings.generation_height
+            frames = settings.generation_frames
+            fps, steps, cfg = settings.generation_fps, settings.generation_steps, settings.generation_cfg
         else:
             width, height = settings.video_width, settings.video_height
             frames, fps, steps, cfg = 121, settings.frame_rate, 20, 5.5
+        width = self.width if self.width is not None else width
+        height = self.height if self.height is not None else height
         if self.aspect_ratio == "9:16":
             width, height = height, width
         return VideoGenerationRequest(

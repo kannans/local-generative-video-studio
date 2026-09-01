@@ -4,7 +4,19 @@ import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { useStudioStore } from "@/lib/store";
 
 type ConnectionState = "connecting" | "connected" | "disconnected";
-type GenerationRequest = { prompt: string; aspect_ratio: "16:9" | "9:16"; quality: "draft" | "final"; reference_name?: string };
+type GenerationRequest = {
+  prompt: string;
+  aspect_ratio: "16:9" | "9:16";
+  quality: "draft" | "final";
+  width: number;
+  height: number;
+  frames: number;
+  steps: number;
+  cfg: number;
+  fps: number;
+  seed: number;
+  reference_name?: string;
+};
 type SocketEvent = { type?: string; status?: string; progress?: number; message?: string; node?: string; preview_url?: string; video_url?: string; mp4_url?: string };
 const apiUrl = "http://localhost:8000";
 
@@ -39,9 +51,9 @@ export function useVideoSocket(url = "ws://localhost:8000/ws/generation") {
     };
     connect(); return () => { if (retry) clearTimeout(retry); socket.current?.close(); };
   }, [url]);
-  function sendGeneration(request: GenerationRequest) {
+  function sendGeneration(request: GenerationRequest, estimatedTime: string) {
     const id = crypto.randomUUID(); progressMessageId.current = id; setIsGenerating(true);
-    addMessage({ id, role: "progress", content: "Queued for local render", progress: 0, createdAt: new Date().toISOString() });
+    addMessage({ id, role: "progress", content: `Queued for local render · estimated ${estimatedTime}`, progress: 0, createdAt: new Date().toISOString() });
     if (socket.current?.readyState === WebSocket.OPEN) socket.current.send(JSON.stringify(request));
     else updateProgress(id, "Waiting for the local engine connection", 0);
   }
