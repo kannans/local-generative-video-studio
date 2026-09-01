@@ -1,13 +1,14 @@
 # Local Generative Video Studio
 
-Phase 1 is the local FastAPI foundation for a generative video studio running
-on Apple Silicon. It provides:
+The local generative video studio runs on Apple Silicon. It provides:
 
 - PyTorch with Apple Metal Performance Shaders (MPS) detection
 - Pydantic-based application settings
 - Automatic local storage directory creation
 - A health endpoint with runtime, accelerator, disk, and video configuration
 - A WebSocket endpoint for generation task progress events
+- Phase 3 ComfyUI workflows for text-to-video, continuation, spatial inpainting,
+  and VideoToolbox-accelerated composition
 
 ## Requirements
 
@@ -42,6 +43,149 @@ The script creates the uv project when `pyproject.toml` is absent, installs the
 dependencies, and exits unsuccessfully if
 `torch.backends.mps.is_available()` is false.
 
+## ComfyUI And Phase 3 Setup
+
+Phase 3 requires a separate ComfyUI runtime, video model assets, and the
+VideoHelperSuite custom node. The local-video-platform virtual environment is
+not the ComfyUI environment; install ComfyUI dependencies only into ComfyUI's
+own `.venv`.
+
+### 1. Create The ComfyUI Environment
+
+Clone ComfyUI beside this project, create a Python 3.11 environment, and install
+its base requirements. Python 3.9 cannot run the current ComfyUI release.
+
+```sh
+cd ~/projects/AIML
+git clone https://github.com/comfyanonymous/ComfyUI.git
+cd ComfyUI
+
+uv venv --python 3.11
+uv pip install --python .venv/bin/python -r requirements.txt
+
+if [ -f manager_requirements.txt ]; then
+	uv pip install --python .venv/bin/python -r manager_requirements.txt
+fi
+```
+
+If the checkout already exists, omit `git clone` and run the remaining commands
+from the ComfyUI directory. Confirm the environment can start ComfyUI:
+
+```sh
+cd ~/projects/AIML/ComfyUI
+source .venv/bin/activate
+python main.py --listen 127.0.0.1 --port 8188
+```
+
+Keep this terminal open while ComfyUI is in use. A normal startup reports an MPS
+device and ends with the local GUI URL. `comfy-aimdo` warnings about macOS are
+informational when ComfyUI selects its eager backend.
+
+### 2. Install VideoHelperSuite
+
+Stop ComfyUI with `Ctrl+C`, then install VideoHelperSuite. It provides
+`VHS_LoadVideo` for continuation/inpainting inputs and `VHS_VideoCombine` for
+MP4 workflow outputs.
+
+```sh
+cd ~/projects/AIML/ComfyUI/custom_nodes
+
+if [ ! -d ComfyUI-VideoHelperSuite ]; then
+	git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git
+fi
+
+cd ComfyUI-VideoHelperSuite
+
+if [ -f requirements.txt ]; then
+	uv pip install \
+		--python ~/projects/AIML/ComfyUI/.venv/bin/python \
+		-r requirements.txt
+fi
+```
+
+Some `uv` environments do not expose a standalone `pip` command. Use `uv pip`
+as above, or `python -m pip` after installing pip into the ComfyUI environment;
+do not run custom-node installs in `local-video-platform/.venv`.
+
+### 3. Download Video Model Assets
+
+Start with a complete **Wan 2.1 Text-to-Video 1.3B** asset bundle on Apple
+Silicon. It is a more practical initial model than a 14B variant on a 48 GB
+unified-memory system. The pipeline exposes an LTX-Video request option, but
+Wan 2.1 is the initial integration target; install one model family for the
+first verification run.
+
+In the ComfyUI web UI at `http://127.0.0.1:8188`, use Manager's model/workflow
+browser to select a Wan 2.1 T2V workflow and download every listed dependency.
+The bundle must include these model classes:
+
+- A Wan 2.1 T2V diffusion model in `models/diffusion_models/`
+- A UMT5 text encoder in `models/text_encoders/`
+- A Wan 2.1 VAE in `models/vae/`
+
+The Phase 3 request defaults expect filenames similar to
+`wan2.1_t2v_1.3B_fp16.safetensors`,
+`umt5_xxl_fp8_e4m3fn_scaled.safetensors`, and `wan_2.1_vae.safetensors`.
+The ComfyUI registry is authoritative: use its exact detected filenames in a
+`VideoGenerationRequest` when your downloaded filenames differ.
+
+### 4. Restart And Verify ComfyUI
+
+Restart ComfyUI after adding custom nodes or model files:
+
+```sh
+cd ~/projects/AIML/ComfyUI
+source .venv/bin/activate
+python main.py --listen 127.0.0.1 --port 8188
+```
+
+From another terminal, query the registered nodes and model choices:
+
+```sh
+cd ~/projects/AIML/local-video-platform
+curl --fail --silent http://127.0.0.1:8188/object_info > /tmp/comfy-object-info.json
+
+uv run python - <<'PY'
+import json
+
+with open("/tmp/comfy-object-info.json") as file:
+	nodes = json.load(file)
+
+for node_name, field in (
+	("UNETLoader", "unet_name"),
+	("CLIPLoader", "clip_name"),
+	("VAELoader", "vae_name"),
+	("VHS_VideoCombine", "format"),
+	("VHS_LoadVideo", "video"),
+):
+	node = nodes.get(node_name)
+	value = "MISSING" if node is None else node["input"]["required"][field][0]
+	print(f"{node_name}.{field}: {value}")
+PY
+```
+
+The three loader entries must list the installed Wan/LTX assets, and both VHS
+entries must be present before starting an end-to-end Phase 3 inference test.
+The server's `object_info` schema is authoritative: verify its node input names
+and model filenames before submitting a production render.
+
+### 5. Run Phase 3 Checks
+
+With ComfyUI running and the registry verification passing, validate the Python
+modules and submit a text-to-video request:
+
+```sh
+cd ~/projects/AIML/local-video-platform
+uv run python -m compileall -q backend
+uv run python -m backend.pipeline.t2v
+```
+
+`backend.pipeline.t2v` submits a 121-frame, 24 fps Wan request. Generated MP4
+files are stored in `backend/storage/exports/<run-id>/`; raw latents are copied
+to `backend/storage/latents/<run-id>/`. The pipeline modules and VideoToolbox
+composition have been smoke-tested locally; a successful render through the
+installed Wan/LTX model remains the required final end-to-end verification.
+
 ## Configuration
 
 Settings are defined in [backend/config.py](backend/config.py) and can be
@@ -59,7 +203,7 @@ overridden with environment variables or a `.env` file in the repository root.
 | `FRAME_RATE` | `24` | Frames per second |
 | `OLLAMA_API_URL` | `http://localhost:11434` | Ollama service URL |
 | `COMFYUI_DIR` | `/Users/kannan.s/projects/AIML/ComfyUI` | ComfyUI checkout containing `main.py` |
-| `COMFYUI_PYTHON` | `python3` | Python interpreter from the ComfyUI environment |
+| `COMFYUI_PYTHON` | `$COMFYUI_DIR/.venv/bin/python` | Python interpreter from the ComfyUI environment |
 | `COMFYUI_HOST` | `127.0.0.1` | Host used for the managed ComfyUI process |
 | `COMFYUI_PORT` | `8188` | Port used for the managed ComfyUI process |
 

@@ -8,3 +8,7 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Local ComfyUI runtime state
+backend/storage/*.log
+backend/storage/*.pid

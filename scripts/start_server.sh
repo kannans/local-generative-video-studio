@@ -3,7 +3,7 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMFYUI_DIR="${COMFYUI_DIR:-/Users/kannan.s/projects/AIML/ComfyUI}"
-COMFYUI_PYTHON="${COMFYUI_PYTHON:-python3}"
+COMFYUI_PYTHON="${COMFYUI_PYTHON:-$COMFYUI_DIR/.venv/bin/python}"
 COMFYUI_HOST="${COMFYUI_HOST:-127.0.0.1}"
 COMFYUI_PORT="${COMFYUI_PORT:-8188}"
 COMFYUI_URL="http://${COMFYUI_HOST}:${COMFYUI_PORT}"
