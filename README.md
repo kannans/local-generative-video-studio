@@ -131,6 +131,34 @@ The Phase 3 request defaults expect filenames similar to
 The ComfyUI registry is authoritative: use its exact detected filenames in a
 `VideoGenerationRequest` when your downloaded filenames differ.
 
+To install the exact assets used by the default workflow directly from the
+Comfy-Org Hugging Face repository, run:
+
+```sh
+export COMFYUI_DIR=/Users/kannan.s/projects/AIML/ComfyUI
+
+mkdir -p \
+  "$COMFYUI_DIR/models/diffusion_models" \
+  "$COMFYUI_DIR/models/text_encoders" \
+  "$COMFYUI_DIR/models/vae"
+
+curl -L --fail \
+  -o "$COMFYUI_DIR/models/diffusion_models/wan2.1_t2v_1.3B_fp16.safetensors" \
+  "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/diffusion_models/wan2.1_t2v_1.3B_fp16.safetensors"
+
+curl -L --fail \
+  -o "$COMFYUI_DIR/models/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors" \
+  "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors"
+
+curl -L --fail \
+  -o "$COMFYUI_DIR/models/vae/wan_2.1_vae.safetensors" \
+  "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors"
+```
+
+Restart ComfyUI after the downloads finish so the loader registry discovers
+the new files. These assets are large; an interrupted download can leave a
+truncated safetensors file that must be deleted and downloaded again.
+
 ### 4. Restart And Verify ComfyUI
 
 Restart ComfyUI after adding custom nodes or model files:
