@@ -15,6 +15,7 @@ on Apple Silicon. It provides:
 - Python 3.12 or newer
 - [`uv`](https://docs.astral.sh/uv/)
 - Ollama running locally if the application needs language-model requests
+- A local [ComfyUI](https://github.com/comfyanonymous/ComfyUI) checkout for image or video workflow execution
 
 Verify the package manager before setup:
 
@@ -28,7 +29,7 @@ From the repository root, initialize the project and install the dependencies:
 
 ```sh
 uv init --name local-video-platform --python 3.12
-uv add fastapi 'uvicorn[standard]' websockets torch torchvision torchaudio aiohttp ffmpeg-python pydantic pydantic-settings
+uv add fastapi 'uvicorn[standard]' websockets torch torchvision torchaudio aiohttp aiosqlite ffmpeg-python pydantic pydantic-settings
 ```
 
 For a repeatable setup, use the project script instead:
@@ -57,6 +58,10 @@ overridden with environment variables or a `.env` file in the repository root.
 | `VIDEO_HEIGHT` | `420` | Video height in pixels |
 | `FRAME_RATE` | `24` | Frames per second |
 | `OLLAMA_API_URL` | `http://localhost:11434` | Ollama service URL |
+| `COMFYUI_DIR` | `/Users/kannan.s/projects/AIML/ComfyUI` | ComfyUI checkout containing `main.py` |
+| `COMFYUI_PYTHON` | `python3` | Python interpreter from the ComfyUI environment |
+| `COMFYUI_HOST` | `127.0.0.1` | Host used for the managed ComfyUI process |
+| `COMFYUI_PORT` | `8188` | Port used for the managed ComfyUI process |
 
 The default video format is `746x420` at 24 fps. Portrait video can be selected
 with `VIDEO_WIDTH=420` and `VIDEO_HEIGHT=746`.
@@ -72,7 +77,16 @@ Start the development server with hot reload:
 ./scripts/start_server.sh
 ```
 
-The script runs the equivalent command:
+`start_server.sh` starts ComfyUI when it is not already running, waits until its
+`/system_stats` endpoint is ready, and then starts the FastAPI server. Configure
+a non-default ComfyUI checkout or interpreter for that invocation:
+
+```sh
+COMFYUI_DIR="$HOME/src/ComfyUI" COMFYUI_PYTHON="$HOME/src/ComfyUI/.venv/bin/python" ./scripts/start_server.sh
+```
+
+When ComfyUI is already running on `COMFYUI_HOST:COMFYUI_PORT`, the script uses
+that existing process without taking ownership of it. The FastAPI command is:
 
 ```sh
 uv run uvicorn backend.api.main:app --reload --host 127.0.0.1 --port 8000
