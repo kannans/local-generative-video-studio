@@ -112,6 +112,29 @@ class ComfyUIClient:
         async with aiohttp.ClientSession(timeout=self.timeout) as owned_session:
             return await self._download_output(owned_session, filename, subfolder, folder_type)
 
+    async def upload_input(self, path: Path, overwrite: bool = True) -> str:
+        """Upload local conditioning media and return its ComfyUI input filename."""
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        form = aiohttp.FormData()
+        form.add_field("image", path.open("rb"), filename=path.name, content_type="application/octet-stream")
+        form.add_field("overwrite", str(overwrite).lower())
+        try:
+            async with aiohttp.ClientSession(timeout=self.timeout) as session:
+                async with session.post(f"{self.base_url}/upload/image", data=form) as response:
+                    body = await response.text()
+                    if response.status >= 400:
+                        raise ComfyUIClientError(f"ComfyUI upload returned HTTP {response.status}: {body}")
+        except aiohttp.ClientError as error:
+            raise ComfyUIClientError(f"Could not upload input to ComfyUI: {error}") from error
+        try:
+            result = json.loads(body)
+            name = result["name"]
+            subfolder = result.get("subfolder", "")
+        except (json.JSONDecodeError, KeyError, TypeError) as error:
+            raise ComfyUIClientError(f"ComfyUI returned an invalid upload response: {body}") from error
+        return f"{subfolder}/{name}".lstrip("/") if subfolder else str(name)
+
     async def save_outputs(self, prompt_id: str, destination: Path) -> list[Path]:
         """Retrieve workflow files and persist them below a local destination directory."""
         outputs = await self.retrieve_outputs(prompt_id)
