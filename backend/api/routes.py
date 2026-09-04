@@ -85,6 +85,9 @@ class ImageGenerationPayload(BaseModel):
     prompt: str = Field(min_length=1)
     style: ImageStyle = "photo"
     aspect_ratio: Literal["1:1", "16:9", "9:16"] = "1:1"
+    width: int | None = Field(default=None, ge=64)
+    height: int | None = Field(default=None, ge=64)
+    steps: int = Field(default=4, ge=1, le=12)
     seed: int = Field(default=settings.generation_seed, ge=0)
 
     def to_request(self) -> ImageGenerationRequest:
@@ -100,7 +103,14 @@ class ImageGenerationPayload(BaseModel):
                 "16:9": (512, 288),
                 "9:16": (288, 512),
             }[self.aspect_ratio]
-        return ImageGenerationRequest(prompt=self.prompt, style=self.style, width=width, height=height, seed=self.seed)
+        return ImageGenerationRequest(
+            prompt=self.prompt,
+            style=self.style,
+            width=width if self.width is None or self.style == "gif" else self.width,
+            height=height if self.height is None or self.style == "gif" else self.height,
+            steps=self.steps,
+            seed=self.seed,
+        )
 
 
 class ExtendPayload(GenerationPayload):

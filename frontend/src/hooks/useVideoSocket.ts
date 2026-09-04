@@ -20,7 +20,7 @@ type VideoGenerationRequest = {
   seed: number;
   reference_name?: string;
 };
-type ImageGenerationRequest = { generation_type: "image"; prompt: string; style: ImageStyle; aspect_ratio: "1:1" | "16:9" | "9:16"; seed: number };
+type ImageGenerationRequest = { generation_type: "image"; prompt: string; style: ImageStyle; aspect_ratio: "1:1" | "16:9" | "9:16"; width: number; height: number; steps: number; seed: number };
 type GenerationRequest = VideoGenerationRequest | ImageGenerationRequest;
 type SocketEvent = { type?: string; status?: string; progress?: number; message?: string; node?: string; preview_url?: string; image_url?: string; video_url?: string; mp4_url?: string };
 const apiUrl = "http://localhost:8000";
@@ -31,15 +31,18 @@ export function useVideoSocket(url = "ws://localhost:8000/ws/generation") {
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [isGenerating, setIsGenerating] = useState(false);
   const addMessage = useStudioStore((state) => state.addMessage);
+  const replaceMessage = useStudioStore((state) => state.replaceMessage);
   const updateProgress = useStudioStore((state) => state.updateProgress);
   const handleEvent = useEffectEvent((event: SocketEvent) => {
     const progress = Math.round(event.progress ?? 0);
     const label = event.message ?? event.node ?? event.status ?? "Preparing generation";
     if (event.image_url) {
-      addMessage({ id: crypto.randomUUID(), role: "image", content: "Generated image", imageUrl: resolveMediaUrl(event.image_url), createdAt: new Date().toISOString() });
+      const message = { id: progressMessageId.current ?? crypto.randomUUID(), role: "image" as const, content: "Generated image", imageUrl: resolveMediaUrl(event.image_url), createdAt: new Date().toISOString() };
+      if (progressMessageId.current) replaceMessage(progressMessageId.current, message); else addMessage(message);
       progressMessageId.current = null; setIsGenerating(false);
     } else if (event.type === "complete" || event.type === "completion" || event.video_url || event.mp4_url) {
-      addMessage({ id: crypto.randomUUID(), role: "video", content: "Generated clip", videoUrl: resolveVideoUrl(event.video_url ?? event.mp4_url), createdAt: new Date().toISOString() });
+      const message = { id: progressMessageId.current ?? crypto.randomUUID(), role: "video" as const, content: "Generated clip", videoUrl: resolveVideoUrl(event.video_url ?? event.mp4_url), createdAt: new Date().toISOString() };
+      if (progressMessageId.current) replaceMessage(progressMessageId.current, message); else addMessage(message);
       progressMessageId.current = null; setIsGenerating(false);
     } else if (event.type === "cancelled" || event.type === "error") {
       if (progressMessageId.current) updateProgress(progressMessageId.current, event.message ?? "Generation stopped", 0);

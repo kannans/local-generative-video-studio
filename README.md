@@ -339,14 +339,26 @@ small profile is 512x288 with 49 frames. Portrait output swaps the dimensions.
 ### Still image
 
 Select **Image**, choose `1:1`, `16:9`, or `9:16`, then choose Photo, 3D
-render, Graphic, or Art. These styles use FLUX.1 Schnell FP8 with four steps.
+render, Graphic, or Art. These styles use FLUX.1 Schnell FP8. Open Studio
+settings to choose an image quality profile:
+
+| Profile | 1:1 | 16:9 | 9:16 | Steps | Use |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Draft | 512x512 | 768x432 | 432x768 | 4 | Faster previews and lower memory use |
+| Standard | 768x768 | 1024x576 | 576x1024 | 4 | Default balanced profile |
+| High | 1024x1024 | 1152x648 | 648x1152 | 8 | More detail at higher memory cost |
+
+Width, height, steps, and seed can also be edited directly. Image dimensions
+must be at least 64 pixels and divisible by 16. Increasing resolution is the
+main quality control and increases MPS memory use; increasing steps increases
+render time and is most useful with the High profile.
 
 ### Animated GIF
 
 Select **Image -> Animated GIF**. The request is routed to LTX-Video 13B for a
 49-frame, 12 fps clip, then FFmpeg converts the generated MP4 to
-`image.gif`. GIF generation uses LTX, not FLUX, and therefore takes longer than
-a still image.
+`image.gif`. GIF generation uses LTX, not FLUX, and uses its fixed 512x288,
+49-frame profile so the LTX dimensions and frame constraints remain valid.
 
 Direct GIF WebSocket smoke test:
 

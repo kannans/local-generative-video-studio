@@ -19,7 +19,7 @@ interface StudioState {
   currentSessionId: string; sessions: StudioSession[]; messages: StudioMessage[];
   playback: Record<string, PlaybackState>; masks: Record<string, MaskStroke[]>;
   createSession: () => void; setCurrentSession: (id: string) => void; clearSessions: () => void;
-  addMessage: (message: StudioMessage) => void; updateProgress: (id: string, content: string, progress: number) => void;
+  addMessage: (message: StudioMessage) => void; replaceMessage: (id: string, message: StudioMessage) => void; updateProgress: (id: string, content: string, progress: number) => void;
   setPlayback: (id: string, update: Partial<PlaybackState>) => void; setMask: (id: string, strokes: MaskStroke[]) => void;
 }
 const initial = { id: "session-1", title: "Untitled motion study", updatedLabel: "Just now" };
@@ -29,6 +29,7 @@ export const useStudioStore = create<StudioState>()(persist((set) => ({
   setCurrentSession: (id) => set({ currentSessionId: id }),
   clearSessions: () => set({ sessions: [initial], currentSessionId: initial.id, messages: [], playback: {}, masks: {} }),
   addMessage: (message) => set((state) => ({ messages: [...state.messages, message] })),
+  replaceMessage: (id, message) => set((state) => ({ messages: state.messages.map((current) => current.id === id ? message : current) })),
   updateProgress: (id, content, progress) => set((state) => ({ messages: state.messages.map((message) => message.id === id ? { ...message, content, progress } : message) })),
   setPlayback: (id, update) => set((state) => {
     const previous = state.playback[id] ?? { playing: false, loop: false, currentTime: 0, duration: 0 };
