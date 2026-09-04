@@ -392,6 +392,99 @@ PY
 Completed media is stored in `backend/storage/exports/<run-id>/` and served at
 `http://127.0.0.1:8000/exports/<run-id>/<filename>`.
 
+## Sample Prompts
+
+Use one clear subject, setting, action, lighting direction, and visual treatment.
+For video and GIF prompts, describe simple continuous motion and a camera move.
+Avoid combining several unrelated subjects or actions in one request.
+
+### Photo Image
+
+Use **Image -> Photo** with the Standard profile:
+
+```text
+Editorial photograph of an adult woman from Kerala wearing an elegant ivory
+kasavu saree with a gold border, standing beside a rain-washed heritage house,
+soft early-morning natural light, realistic skin texture, detailed fabric,
+85mm lens, shallow depth of field, warm cinematic color grade
+```
+
+### 3D Render Image
+
+Use **Image -> 3D render** with the Standard or High profile:
+
+```text
+A futuristic eco-resort floating above Kerala backwaters, curved white
+architecture, dense tropical plants, reflective water, small wooden boats
+below, golden-hour sunlight, physically based materials, cinematic 3D render,
+highly detailed, wide-angle composition
+```
+
+### Graphic Image
+
+Use **Image -> Graphic** with the Standard profile:
+
+```text
+Premium travel-poster design for Kerala backwaters, bold teal and coral color
+palette, stylized houseboat silhouette, layered palm leaves, clean geometric
+waves, deliberate empty space for a title, crisp vector shapes, balanced
+editorial layout
+```
+
+### Art Image
+
+Use **Image -> Art** with the Standard or High profile:
+
+```text
+Fine-art painting of monsoon clouds gathering over Kerala rice fields, a narrow
+footpath through vivid green paddies, distant coconut palms, a lone umbrella,
+expressive brushwork, rich texture, atmospheric light, deep emerald and indigo
+palette, museum-quality composition
+```
+
+### GIF Prompt
+
+Use **Image -> Animated GIF**. This uses LTX-Video 13B and its fixed 512x288,
+49-frame profile:
+
+```text
+A small houseboat drifting gently through Kerala backwaters at sunset, palm
+trees reflected in calm water, warm lanterns glowing, subtle ripples, a light
+breeze moving the palm leaves, locked camera, smooth seamless loop
+```
+
+### Wan Video
+
+Use **Video -> Wan 2.1** with the Draft profile for the lightest video workflow:
+
+```text
+A cinematic tracking shot following a traditional houseboat moving slowly
+through Kerala backwaters at sunrise, soft mist above the water, palm trees
+passing in the foreground, warm golden light, natural reflections, calm
+documentary atmosphere
+```
+
+### LTX Video
+
+Use **Video -> LTX-Video 13B** with 512x288 dimensions and 49 frames when
+starting a new prompt:
+
+```text
+Slow cinematic orbit around a futuristic tea plantation on misty mountain
+terraces, workers in colorful raincoats moving through rows of tea plants,
+clouds rolling across the valley, dramatic volumetric light, realistic camera
+motion, detailed environment
+```
+
+### Prompt Template
+
+Adapt this structure for new requests:
+
+```text
+[subject] in [setting], [single action], [camera movement or composition],
+[lighting], [visual style], [important material or environmental details]
+```
+
 ## WebSocket Contract
 
 Connect to `ws://127.0.0.1:8000/ws/generation`. Video requests use the existing
