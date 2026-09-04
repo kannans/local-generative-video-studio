@@ -1,13 +1,16 @@
 "use client";
 
 import { useEffect, useEffectEvent, useRef, useState } from "react";
-import { useStudioStore } from "@/lib/store";
+import { resolveMediaUrl, resolveVideoUrl, useStudioStore } from "@/lib/store";
 
 type ConnectionState = "connecting" | "connected" | "disconnected";
-type GenerationRequest = {
+export type ImageStyle = "photo" | "3d" | "graphic" | "art" | "gif";
+type VideoGenerationRequest = {
+  generation_type: "video";
   prompt: string;
   aspect_ratio: "16:9" | "9:16";
   quality: "draft" | "final";
+  model: "wan-2.1" | "ltx-video";
   width: number;
   height: number;
   frames: number;
@@ -17,7 +20,9 @@ type GenerationRequest = {
   seed: number;
   reference_name?: string;
 };
-type SocketEvent = { type?: string; status?: string; progress?: number; message?: string; node?: string; preview_url?: string; video_url?: string; mp4_url?: string };
+type ImageGenerationRequest = { generation_type: "image"; prompt: string; style: ImageStyle; aspect_ratio: "1:1" | "16:9" | "9:16"; seed: number };
+type GenerationRequest = VideoGenerationRequest | ImageGenerationRequest;
+type SocketEvent = { type?: string; status?: string; progress?: number; message?: string; node?: string; preview_url?: string; image_url?: string; video_url?: string; mp4_url?: string };
 const apiUrl = "http://localhost:8000";
 
 export function useVideoSocket(url = "ws://localhost:8000/ws/generation") {
@@ -30,8 +35,11 @@ export function useVideoSocket(url = "ws://localhost:8000/ws/generation") {
   const handleEvent = useEffectEvent((event: SocketEvent) => {
     const progress = Math.round(event.progress ?? 0);
     const label = event.message ?? event.node ?? event.status ?? "Preparing generation";
-    if (event.type === "complete" || event.type === "completion" || event.video_url || event.mp4_url) {
-      addMessage({ id: crypto.randomUUID(), role: "video", content: "Generated clip", videoUrl: event.video_url ?? event.mp4_url, createdAt: new Date().toISOString() });
+    if (event.image_url) {
+      addMessage({ id: crypto.randomUUID(), role: "image", content: "Generated image", imageUrl: resolveMediaUrl(event.image_url), createdAt: new Date().toISOString() });
+      progressMessageId.current = null; setIsGenerating(false);
+    } else if (event.type === "complete" || event.type === "completion" || event.video_url || event.mp4_url) {
+      addMessage({ id: crypto.randomUUID(), role: "video", content: "Generated clip", videoUrl: resolveVideoUrl(event.video_url ?? event.mp4_url), createdAt: new Date().toISOString() });
       progressMessageId.current = null; setIsGenerating(false);
     } else if (event.type === "cancelled" || event.type === "error") {
       if (progressMessageId.current) updateProgress(progressMessageId.current, event.message ?? "Generation stopped", 0);
@@ -42,14 +50,16 @@ export function useVideoSocket(url = "ws://localhost:8000/ws/generation") {
   });
   useEffect(() => {
     let retry: ReturnType<typeof setTimeout> | undefined;
+    let disposed = false;
     const connect = () => {
+      if (disposed) return;
       setConnection("connecting"); const instance = new WebSocket(url); socket.current = instance;
       instance.onopen = () => setConnection("connected");
       instance.onmessage = (message) => { try { handleEvent(JSON.parse(message.data) as SocketEvent); } catch { /* Ignore non-JSON frames. */ } };
-      instance.onclose = () => { setConnection("disconnected"); retry = setTimeout(connect, 3000); };
+      instance.onclose = () => { if (disposed) return; setConnection("disconnected"); retry = setTimeout(connect, 3000); };
       instance.onerror = () => instance.close();
     };
-    connect(); return () => { if (retry) clearTimeout(retry); socket.current?.close(); };
+    connect(); return () => { disposed = true; if (retry) clearTimeout(retry); socket.current?.close(); };
   }, [url]);
   function sendGeneration(request: GenerationRequest, estimatedTime: string) {
     const id = crypto.randomUUID(); progressMessageId.current = id; setIsGenerating(true);

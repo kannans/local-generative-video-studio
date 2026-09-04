@@ -1,14 +1,17 @@
 "use client";
 
-import { FormEvent, useRef, useState } from "react";
-import { Ban, ChevronDown, Clapperboard, History, ImagePlus, ListX, Menu, Plus, Send, SlidersHorizontal, Sparkles, Trash2, X } from "lucide-react";
+import { FormEvent, useEffect, useRef, useState } from "react";
+import { Ban, ChevronDown, Clapperboard, History, Images, ImagePlus, ListX, Menu, Plus, Send, SlidersHorizontal, Sparkles, Trash2, Video, X } from "lucide-react";
+import { ImageViewer } from "@/app/components/ImageViewer";
 import { VideoViewer } from "@/components/player/VideoViewer";
-import { useVideoSocket } from "@/hooks/useVideoSocket";
+import { ImageStyle, useVideoSocket } from "@/hooks/useVideoSocket";
 import { AspectRatio, useStudioStore } from "@/lib/store";
 
 const prompts = ["A silver tide cuts through black sand", "A sunlit train crossing a foggy valley", "A tiny botanical world growing on a desk"];
-const defaultGenerationSettings = { width: 512, height: 288, frames: 49, steps: 12, cfg: 5.0, fps: 16, seed: 73 };
-type GenerationSettings = typeof defaultGenerationSettings;
+type VideoModel = "wan-2.1" | "ltx-video";
+type GenerationMode = "image" | "video";
+type GenerationSettings = { model: VideoModel; width: number; height: number; frames: number; steps: number; cfg: number; fps: number; seed: number };
+const defaultGenerationSettings: GenerationSettings = { model: "wan-2.1", width: 512, height: 288, frames: 49, steps: 12, cfg: 5.0, fps: 16, seed: 73 };
 
 function estimatedRenderSeconds(settings: GenerationSettings) {
   const benchmarkWork = 512 * 288 * 49 * 12;
@@ -25,6 +28,8 @@ export default function Home() {
   const ref = useRef<HTMLTextAreaElement>(null);
   const [drawer, setDrawer] = useState(false);
   const [prompt, setPrompt] = useState("");
+  const [mode, setMode] = useState<GenerationMode>("video");
+  const [imageStyle, setImageStyle] = useState<ImageStyle>("photo");
   const [ratio, setRatio] = useState<AspectRatio>("16:9");
   const [file, setFile] = useState<File | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -32,11 +37,19 @@ export default function Home() {
   const [queueAction, setQueueAction] = useState<"cancel" | "clear-queue" | null>(null);
   const { sessions, currentSessionId, messages, createSession, clearSessions, addMessage, setCurrentSession } = useStudioStore();
   const { connection, controlGeneration, isGenerating, sendGeneration } = useVideoSocket();
-  const renderEstimate = formatDuration(estimatedRenderSeconds(generationSettings));
+  const renderEstimate = generationSettings.model === "ltx-video" ? "not calibrated" : formatDuration(estimatedRenderSeconds(generationSettings));
   const clipDuration = (generationSettings.frames / generationSettings.fps).toFixed(1);
 
-  function updateSetting(name: keyof GenerationSettings, value: number) {
+  useEffect(() => {
+    void useStudioStore.persist.rehydrate();
+  }, []);
+
+  function updateSetting(name: Exclude<keyof GenerationSettings, "model">, value: number) {
     setGenerationSettings((current) => ({ ...current, [name]: value }));
+  }
+
+  function selectModel(model: VideoModel) {
+    setGenerationSettings((current) => ({ ...current, model, steps: model === "ltx-video" ? 8 : 12, cfg: model === "ltx-video" ? 1 : 5 }));
   }
 
   function submit(event: FormEvent) {
@@ -44,10 +57,19 @@ export default function Home() {
     const value = prompt.trim();
     if (!value || isGenerating) return;
     addMessage({ id: crypto.randomUUID(), role: "user", content: value, createdAt: new Date().toISOString() });
-    sendGeneration({ prompt: value, aspect_ratio: ratio, quality: "draft", ...generationSettings, reference_name: file?.name }, renderEstimate);
+    if (mode === "image") {
+      sendGeneration({ generation_type: "image", prompt: value, style: imageStyle, aspect_ratio: ratio, seed: generationSettings.seed }, imageStyle === "gif" ? "not calibrated" : "about 1 min");
+    } else {
+      sendGeneration({ generation_type: "video", prompt: value, aspect_ratio: ratio === "1:1" ? "16:9" : ratio, quality: "draft", ...generationSettings, reference_name: file?.name }, renderEstimate);
+    }
     setPrompt("");
     setFile(null);
     if (ref.current) ref.current.style.height = "auto";
+  }
+
+  function selectMode(nextMode: GenerationMode) {
+    setMode(nextMode);
+    if (nextMode === "video" && ratio === "1:1") setRatio("16:9");
   }
 
   async function handleQueueAction(action: "cancel" | "clear-queue") {
@@ -76,12 +98,16 @@ export default function Home() {
         <div className="header-actions">
           <button onClick={() => handleQueueAction("cancel")} disabled={!isGenerating || queueAction !== null} aria-label="Cancel current generation" title="Cancel current generation"><Ban size={18} /></button>
           <button onClick={() => handleQueueAction("clear-queue")} disabled={queueAction !== null} aria-label="Clear pending generations" title="Clear pending generations"><ListX size={18} /></button>
-          <button onClick={() => setSettingsOpen(true)} aria-label="Studio settings" title="Studio settings"><SlidersHorizontal size={18} /></button>
+          {mode === "video" && <button onClick={() => setSettingsOpen(true)} aria-label="Studio settings" title="Studio settings"><SlidersHorizontal size={18} /></button>}
         </div>
       </header>
       {settingsOpen && <div className="settings-backdrop" onMouseDown={() => setSettingsOpen(false)}>
         <section className="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title" onMouseDown={(event) => event.stopPropagation()}>
           <div className="settings-heading"><div><p className="label">GENERATION</p><h2 id="settings-title">Studio settings</h2></div><button onClick={() => setSettingsOpen(false)} aria-label="Close settings"><X size={18} /></button></div>
+          <div className="model-switch" role="group" aria-label="Generation model">
+            <button className={generationSettings.model === "wan-2.1" ? "selected" : ""} onClick={() => selectModel("wan-2.1")}>Wan 2.1</button>
+            <button className={generationSettings.model === "ltx-video" ? "selected" : ""} onClick={() => selectModel("ltx-video")}>LTX-Video 13B</button>
+          </div>
           <div className="settings-grid">
             <label>Width<input type="number" min="16" step="2" value={generationSettings.width} onChange={(event) => updateSetting("width", Number(event.target.value))} /></label>
             <label>Height<input type="number" min="16" step="2" value={generationSettings.height} onChange={(event) => updateSetting("height", Number(event.target.value))} /></label>
@@ -91,19 +117,19 @@ export default function Home() {
             <label>FPS<input type="number" min="1" value={generationSettings.fps} onChange={(event) => updateSetting("fps", Number(event.target.value))} /></label>
             <label>Seed<input type="number" min="0" value={generationSettings.seed} onChange={(event) => updateSetting("seed", Number(event.target.value))} /></label>
           </div>
-          <div className="settings-estimate"><span>Estimated render</span><strong>about {renderEstimate}</strong><small>{clipDuration}s output · M4 Pro benchmark</small></div>
+          <div className="settings-estimate"><span>Estimated render</span><strong>{generationSettings.model === "ltx-video" ? renderEstimate : `about ${renderEstimate}`}</strong><small>{clipDuration}s output · {generationSettings.model === "ltx-video" ? "calibrate after first run" : "M4 Pro benchmark"}</small></div>
           <div className="settings-footer"><button onClick={() => setGenerationSettings(defaultGenerationSettings)}>Reset defaults</button><button className="apply-settings" onClick={() => setSettingsOpen(false)}>Done</button></div>
         </section>
       </div>}
       <div className="messages">
         <div className="welcome"><span><Sparkles size={21} /></span><p className="label">LOCAL VIDEO STUDIO</p><h2>Make the first frame count.</h2><p>Describe a shot, bring a reference, then shape every result in the timeline.</p><div className="ideas">{prompts.map((idea) => <button onClick={() => { setPrompt(idea); ref.current?.focus(); }} key={idea}>{idea}</button>)}</div></div>
-        {messages.map((message) => message.role === "user" ? <div className="bubble" key={message.id}>{message.content}</div> : message.role === "progress" ? <div className="progress" key={message.id}><b>Generating clip <em>{message.progress ?? 0}%</em></b><div><i style={{ width: `${message.progress ?? 0}%` }} /></div><p>{message.content}</p></div> : message.role === "video" && message.videoUrl ? <VideoViewer key={message.id} videoId={message.id} title={message.content} src={message.videoUrl} /> : <p className="notice" key={message.id}>{message.content}</p>)}
+        {messages.map((message) => message.role === "user" ? <div className="bubble" key={message.id}>{message.content}</div> : message.role === "progress" ? <div className="progress" key={message.id}><b>Generating media <em>{message.progress ?? 0}%</em></b><div><i style={{ width: `${message.progress ?? 0}%` }} /></div><p>{message.content}</p></div> : message.role === "video" && message.videoUrl ? <VideoViewer key={message.id} videoId={message.id} title={message.content} src={message.videoUrl} /> : message.role === "image" && message.imageUrl ? <ImageViewer key={message.id} title={message.content} src={message.imageUrl} /> : <p className="notice" key={message.id}>{message.content}</p>)}
       </div>
       <form onSubmit={submit} className="composer">
         {file && <div className="file"><ImagePlus size={13} />{file.name}<button type="button" onClick={() => setFile(null)} aria-label="Remove reference image"><X size={13} /></button></div>}
         <textarea ref={ref} rows={1} value={prompt} onChange={(event) => { setPrompt(event.target.value); event.target.style.height = "auto"; event.target.style.height = `${Math.min(event.target.scrollHeight, 120)}px`; }} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) submit(event); }} placeholder="Describe the next shot..." />
-        <p className="render-summary">{generationSettings.width}×{generationSettings.height} · {generationSettings.frames} frames · {generationSettings.steps} steps · about {renderEstimate}</p>
-        <div><label><ImagePlus size={16} /><span>Upload Reference Image</span><input type="file" accept="image/*" onChange={(event) => setFile(event.target.files?.[0] ?? null)} /></label><label className="ratio">{ratio}<ChevronDown size={13} /><select value={ratio} onChange={(event) => setRatio(event.target.value as AspectRatio)}><option>16:9</option><option>9:16</option></select></label><button className="send" disabled={!prompt.trim() || isGenerating} aria-label="Send"><Send size={16} /></button></div>
+        <p className="render-summary">{mode === "image" ? `${imageStyle === "gif" ? "Animated GIF · LTX-Video 13B" : `Image · FLUX.1 Schnell · ${imageStyle}`} · ${ratio}` : `${generationSettings.model === "ltx-video" ? "LTX-Video 13B" : "Wan 2.1"} · ${generationSettings.width}×${generationSettings.height} · ${generationSettings.frames} frames · ${generationSettings.steps} steps · ${generationSettings.model === "ltx-video" ? renderEstimate : `about ${renderEstimate}`}`}</p>
+        <div><div className="generation-mode" role="group" aria-label="Generation type"><button type="button" className={mode === "image" ? "selected" : ""} onClick={() => selectMode("image")} title="Generate image"><Images size={15} />Image</button><button type="button" className={mode === "video" ? "selected" : ""} onClick={() => selectMode("video")} title="Generate video"><Video size={15} />Video</button></div>{mode === "image" ? <label className="style-select">{imageStyle === "3d" ? "3D" : imageStyle[0].toUpperCase() + imageStyle.slice(1)}<ChevronDown size={13} /><select value={imageStyle} onChange={(event) => setImageStyle(event.target.value as ImageStyle)}><option value="photo">Photo</option><option value="3d">3D render</option><option value="graphic">Graphic</option><option value="art">Art</option><option value="gif">Animated GIF</option></select></label> : <label><ImagePlus size={16} /><span>Upload Reference Image</span><input type="file" accept="image/*" onChange={(event) => setFile(event.target.files?.[0] ?? null)} /></label>}<label className="ratio">{ratio}<ChevronDown size={13} /><select value={ratio} onChange={(event) => setRatio(event.target.value as AspectRatio)}>{mode === "image" && <option>1:1</option>}<option>16:9</option><option>9:16</option></select></label><button className="send" disabled={!prompt.trim() || isGenerating} aria-label="Send"><Send size={16} /></button></div>
       </form>
     </section>
   </main>;

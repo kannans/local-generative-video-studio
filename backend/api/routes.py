@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 
 from backend.config import settings
 from backend.inference.comfy_client import ComfyProgressEvent, ComfyUIClient
+from backend.pipeline.image import GeneratedImage, ImageGenerationEngine, ImageGenerationRequest, ImageStyle
 from backend.pipeline.i2v import VideoContinuationEngine
 from backend.pipeline.inpaint import SpatialInpaintEngine
 from backend.pipeline.t2v import GeneratedVideo, TextToVideoEngine, VideoGenerationRequest
@@ -51,10 +52,22 @@ class GenerationPayload(BaseModel):
         height = self.height if self.height is not None else height
         if self.aspect_ratio == "9:16":
             width, height = height, width
+        checkpoint = (
+            "wan2.1_t2v_1.3B_fp16.safetensors"
+            if self.model == "wan-2.1"
+            else "ltxv-13b-0.9.8-distilled-fp8.safetensors"
+        )
+        text_encoder = (
+            "umt5_xxl_fp8_e4m3fn_scaled.safetensors"
+            if self.model == "wan-2.1"
+            else "t5xxl_fp8_e4m3fn_scaled.safetensors"
+        )
         return VideoGenerationRequest(
             prompt=self.prompt,
             negative_prompt=self.negative_prompt,
             model=self.model,
+            checkpoint=checkpoint,
+            text_encoder=text_encoder,
             seed=self.seed,
             frames=self.frames if self.frames is not None else frames,
             width=width,
@@ -63,6 +76,31 @@ class GenerationPayload(BaseModel):
             steps=self.steps if self.steps is not None else steps,
             cfg=self.cfg if self.cfg is not None else cfg,
         )
+
+
+class ImageGenerationPayload(BaseModel):
+    """Public controls for a prompt-driven image or animated GIF job."""
+
+    generation_type: Literal["image"] = "image"
+    prompt: str = Field(min_length=1)
+    style: ImageStyle = "photo"
+    aspect_ratio: Literal["1:1", "16:9", "9:16"] = "1:1"
+    seed: int = Field(default=settings.generation_seed, ge=0)
+
+    def to_request(self) -> ImageGenerationRequest:
+        dimensions = {
+            "1:1": (768, 768),
+            "16:9": (1024, 576),
+            "9:16": (576, 1024),
+        }
+        width, height = dimensions[self.aspect_ratio]
+        if self.style == "gif":
+            width, height = {
+                "1:1": (512, 512),
+                "16:9": (512, 288),
+                "9:16": (288, 512),
+            }[self.aspect_ratio]
+        return ImageGenerationRequest(prompt=self.prompt, style=self.style, width=width, height=height, seed=self.seed)
 
 
 class ExtendPayload(GenerationPayload):
@@ -78,7 +116,8 @@ class InpaintPayload(GenerationPayload):
     mask: str = Field(min_length=1)
 
 
-JobFactory = Callable[[Callable[[ComfyProgressEvent], Awaitable[None]], str], Awaitable[GeneratedVideo]]
+GeneratedMedia = GeneratedVideo | GeneratedImage
+JobFactory = Callable[[Callable[[ComfyProgressEvent], Awaitable[None]], str], Awaitable[GeneratedMedia]]
 
 
 class GenerationDispatcher:
@@ -88,6 +127,7 @@ class GenerationDispatcher:
         client = ComfyUIClient()
         text_to_video = TextToVideoEngine(client)
         self.text_to_video = text_to_video
+        self.image = ImageGenerationEngine(client, text_to_video)
         self.continuation = VideoContinuationEngine(text_to_video)
         self.inpaint_engine = SpatialInpaintEngine(text_to_video)
         self.connections: set[WebSocket] = set()
@@ -128,6 +168,14 @@ class GenerationDispatcher:
                     event.node_id or "unknown",
                 )
                 logged_progress = reported_progress
+            else:
+                logger.info(
+                    "Generation job %s event=%s progress=%d%% node=%s",
+                    job_id,
+                    event.event_type,
+                    reported_progress,
+                    event.node_id or "unknown",
+                )
             await self.broadcast(
                 {
                     "type": "progress",
@@ -146,14 +194,16 @@ class GenerationDispatcher:
             logger.exception("Generation job %s failed: %s", job_id, error)
             await self.broadcast({"type": "error", "job_id": job_id, "status": "failed", "progress": 0, "message": str(error)})
             return
-        logger.info("Generation job %s completed; export=%s", job_id, generated.video_path)
+        media_path = generated.image_path if isinstance(generated, GeneratedImage) else generated.video_path
+        media_key = "image_url" if isinstance(generated, GeneratedImage) else "video_url"
+        logger.info("Generation job %s completed; export=%s", job_id, media_path)
         await self.broadcast(
             {
                 "type": "complete",
                 "job_id": job_id,
                 "status": "complete",
                 "progress": 100,
-                "video_url": export_url(generated.video_path),
+                media_key: export_url(media_path),
                 "run_id": generated.run_id,
             }
         )
@@ -269,14 +319,29 @@ async def generation_websocket(websocket: WebSocket) -> None:
     dispatcher.connections.add(websocket)
     try:
         while True:
-            payload = GenerationPayload.model_validate(await websocket.receive_json())
+            raw_payload = await websocket.receive_json()
+            if raw_payload.get("generation_type") == "image":
+                image_request = ImageGenerationPayload.model_validate(raw_payload).to_request()
 
-            async def job(
-                report: Callable[[ComfyProgressEvent], Awaitable[None]],
-                run_id: str,
-                request: VideoGenerationRequest = payload.to_request(),
-            ) -> GeneratedVideo:
-                return await dispatcher.text_to_video.run_and_wait(request, run_id, report)
+                async def image_job(
+                    report: Callable[[ComfyProgressEvent], Awaitable[None]],
+                    run_id: str,
+                    request: ImageGenerationRequest = image_request,
+                ) -> GeneratedImage:
+                    return await dispatcher.image.generate(request, run_id, report)
+
+                job = image_job
+            else:
+                video_request = GenerationPayload.model_validate(raw_payload).to_request()
+
+                async def video_job(
+                    report: Callable[[ComfyProgressEvent], Awaitable[None]],
+                    run_id: str,
+                    request: VideoGenerationRequest = video_request,
+                ) -> GeneratedVideo:
+                    return await dispatcher.text_to_video.run_and_wait(request, run_id, report)
+
+                job = video_job
 
             await websocket.send_json({"type": "accepted", "job_id": dispatcher.start(job), "status": "queued", "progress": 0})
     except WebSocketDisconnect:

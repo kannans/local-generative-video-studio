@@ -173,6 +173,7 @@ class ComfyUIClient:
         """Fail early when a workflow names models unavailable to ComfyUI."""
         object_info = await self._request_json(session, "GET", "/object_info")
         loader_inputs = {
+            "CheckpointLoaderSimple": "ckpt_name",
             "UNETLoader": "unet_name",
             "CLIPLoader": "clip_name",
             "VAELoader": "vae_name",

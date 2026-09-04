@@ -70,12 +70,9 @@ class TextToVideoEngine:
         self.settings = app_settings
 
     def build_workflow(self, request: VideoGenerationRequest, output_prefix: str) -> dict[str, Any]:
-        """Build a ComfyUI API workflow using the bundled native video nodes.
-
-        Wan and LTX use the same ComfyUI model-loader/sample/decode contract;
-        `model` selects the loader's architecture profile. The `VHS_VideoCombine`
-        node is supplied by VideoHelperSuite and produces a real MP4 artifact.
-        """
+        """Build the model-specific ComfyUI API workflow."""
+        if request.model == "ltx-video":
+            return self._build_ltx_workflow(request, output_prefix)
         workflow: dict[str, Any] = {
             "1": {"class_type": "UNETLoader", "inputs": {"unet_name": request.checkpoint, "weight_dtype": "default"}},
             "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": request.text_encoder, "type": "wan" if request.model == "wan-2.1" else "ltxv"}},
@@ -89,6 +86,28 @@ class TextToVideoEngine:
             "10": {"class_type": "VHS_VideoCombine", "inputs": {"images": ["8", 0], "frame_rate": request.fps, "loop_count": 0, "filename_prefix": f"{output_prefix}/video", "format": "video/h264-mp4", "pingpong": False, "save_output": True}},
         }
         return workflow
+
+    @staticmethod
+    def _build_ltx_workflow(request: VideoGenerationRequest, output_prefix: str) -> dict[str, Any]:
+        """Build the native LTX-Video 13B distilled workflow shipped with ComfyUI."""
+        if request.width % 32 or request.height % 32:
+            raise ValueError("LTX-Video width and height must be divisible by 32")
+        if (request.frames - 1) % 8:
+            raise ValueError("LTX-Video frame count must equal 8n + 1")
+        return {
+            "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": request.checkpoint}},
+            "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": request.text_encoder, "type": "ltxv"}},
+            "3": {"class_type": "CLIPTextEncode", "inputs": {"text": request.prompt, "clip": ["2", 0]}},
+            "4": {"class_type": "CLIPTextEncode", "inputs": {"text": request.negative_prompt, "clip": ["2", 0]}},
+            "5": {"class_type": "EmptyLTXVLatentVideo", "inputs": {"width": request.width, "height": request.height, "length": request.frames, "batch_size": 1}},
+            "6": {"class_type": "LTXVConditioning", "inputs": {"positive": ["3", 0], "negative": ["4", 0], "frame_rate": request.fps}},
+            "7": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": request.sampler_name}},
+            "8": {"class_type": "LTXVScheduler", "inputs": {"steps": request.steps, "max_shift": 2.05, "base_shift": 0.95, "stretch": True, "terminal": 0.1, "latent": ["5", 0]}},
+            "9": {"class_type": "SamplerCustom", "inputs": {"model": ["1", 0], "add_noise": True, "noise_seed": request.seed, "cfg": request.cfg, "positive": ["6", 0], "negative": ["6", 1], "sampler": ["7", 0], "sigmas": ["8", 0], "latent_image": ["5", 0]}},
+            "10": {"class_type": "VAEDecode", "inputs": {"samples": ["9", 0], "vae": ["1", 2]}},
+            "11": {"class_type": "SaveLatent", "inputs": {"samples": ["9", 0], "filename_prefix": f"{output_prefix}/latent"}},
+            "12": {"class_type": "VHS_VideoCombine", "inputs": {"images": ["10", 0], "frame_rate": request.fps, "loop_count": 0, "filename_prefix": f"{output_prefix}/video", "format": "video/h264-mp4", "pingpong": False, "save_output": True}},
+        }
 
     async def generate(self, request: VideoGenerationRequest, run_id: str | None = None, progress_callback: Callable[[Any], Awaitable[None]] | None = None) -> GeneratedVideo:
         """Run a 4-6 second text-to-video generation and persist its artifacts."""

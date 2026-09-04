@@ -1,553 +1,465 @@
 # Local Generative Video Studio
 
-The local generative video studio runs on Apple Silicon. It provides:
+Local Generative Video Studio is an Apple Silicon application for prompt-driven
+video, still-image, and animated-GIF generation. FastAPI submits workflows to a
+local ComfyUI instance; the Next.js studio streams progress over WebSocket and
+serves generated media from the local export directory.
 
-- PyTorch with Apple Metal Performance Shaders (MPS) detection
-- Pydantic-based application settings
-- Automatic local storage directory creation
-- A health endpoint with runtime, accelerator, disk, and video configuration
-- Asynchronous FastAPI routes for generation, continuation, and inpainting
-- Live ComfyUI progress streamed to the web studio over WebSocket
-- Draft and Final generation presets for local iteration and output rendering
-- MP4 export serving, queue cancellation, temporary-frame cleanup, and an
-  all-in-one local launcher
+## Features
+
+- Wan 2.1 T2V 1.3B and LTX-Video 13B distilled FP8 video workflows
+- FLUX.1 Schnell FP8 still-image generation
+- Photo, 3D render, graphic, and art image styles
+- Animated GIF generation through LTX-Video followed by FFmpeg palette encoding
+- Live ComfyUI progress, cancellation, queue clearing, MP4/PNG/GIF downloads
+- Apple MPS detection and local export/latent storage
 
 ## Requirements
 
-- macOS on Apple Silicon, such as an M4 Pro with 48 GB unified memory
-- Python 3.12 or newer
-- [`uv`](https://docs.astral.sh/uv/)
-- Ollama running locally if the application needs language-model requests
-- A local [ComfyUI](https://github.com/comfyanonymous/ComfyUI) checkout for image or video workflow execution
+- macOS on Apple Silicon; the documented target is an M4 Pro with 48 GB unified memory
+- Python 3.12 or newer for this project
+- Python 3.11 for the ComfyUI environment
+- `uv`, `curl`, `git`, and `ffmpeg`
+- Ollama if language-model requests are enabled
+- A separate ComfyUI checkout with its own virtual environment
 
-Verify the package manager before setup:
+Model weights are intentionally not committed to this repository.
 
-```sh
-uv --version
+## Architecture
+
+The platform has four runtime layers:
+
+1. **Next.js Studio**. Provides the chat interface and Image/Video mode
+  controls, sends generation requests through
+  `ws://127.0.0.1:8000/ws/generation`, and displays progress events and
+  completed media.
+
+1. **FastAPI Backend**. Validates request payloads with Pydantic, creates
+  generation jobs through `GenerationDispatcher`, broadcasts queued/progress/
+  completion/error events, and serves generated media from `/exports`.
+
+1. **Generation Pipelines**. `ImageGenerationEngine` builds FLUX still-image
+  workflows, `TextToVideoEngine` builds Wan or LTX video workflows, and
+  animated GIF requests use LTX video generation followed by FFmpeg conversion.
+
+1. **ComfyUI Inference Runtime**. Receives API-format workflows through
+  `POST /prompt`, executes the selected model and custom nodes, streams
+  execution events through its WebSocket API, and returns generated image,
+  video, and latent artifacts.
+
+### Request Flow
+
+```mermaid
+flowchart LR
+   UI[Next.js Studio] -->|WebSocket JSON| API[FastAPI API]
+   API --> D[GenerationDispatcher]
+
+   D --> IMG[ImageGenerationEngine]
+   D --> VID[TextToVideoEngine]
+
+   IMG -->|Still image workflow| FLUX[FLUX.1 Schnell FP8]
+   VID -->|Wan workflow| WAN[Wan 2.1 T2V 1.3B]
+   VID -->|LTX workflow| LTX[LTX-Video 13B FP8]
+
+   FLUX --> COMFY[ComfyUI]
+   WAN --> COMFY
+   LTX --> COMFY
+
+   COMFY --> OUTPUT[Exported media]
+   OUTPUT --> API
+   API --> UI
+
+   LTX --> MP4[Temporary MP4]
+   MP4 --> FFMPEG[FFmpeg]
+   FFMPEG --> GIF[Animated GIF]
 ```
 
-## Installation
+### Model Routing
 
-From the repository root, initialize the project and install the dependencies:
+| Output | Pipeline | Model |
+| --- | --- | --- |
+| Photo, 3D, Graphic, or Art image | `ImageGenerationEngine` | `flux1-schnell-fp8.safetensors` |
+| Wan video | `TextToVideoEngine` | `wan2.1_t2v_1.3B_fp16.safetensors` |
+| LTX video | `TextToVideoEngine` | `ltxv-13b-0.9.8-distilled-fp8.safetensors` |
+| Animated GIF | LTX pipeline followed by FFmpeg | LTX-Video 13B FP8 |
 
-```sh
-uv init --name local-video-platform --python 3.12
-uv add fastapi 'uvicorn[standard]' websockets torch torchvision torchaudio aiohttp aiosqlite ffmpeg-python pydantic pydantic-settings
+A still-image request runs this ComfyUI workflow:
+
+`CheckpointLoaderSimple -> CLIPTextEncode -> ConditioningZeroOut -> EmptySD3LatentImage -> KSampler -> VAEDecode -> SaveImage`
+
+A video request runs either the Wan or LTX workflow and ends with
+`VHS_VideoCombine`. An animated GIF uses the LTX video workflow, saves an
+intermediate MP4, and converts it to `image.gif` using FFmpeg.
+
+### Storage Flow
+
+Generated artifacts are copied from ComfyUI into:
+
+```text
+backend/storage/exports/<run-id>/
 ```
 
-For a repeatable setup, use the project script instead:
+Video latents are additionally copied into:
+
+```text
+backend/storage/latents/<run-id>/
+```
+
+The backend returns `image_url` for still images and GIFs, and `video_url` for
+generated videos.
+
+## Project Setup
+
+From the repository root:
 
 ```sh
 ./scripts/setup_env.sh
 ```
 
-The script creates the uv project when `pyproject.toml` is absent, installs the
-dependencies, and exits unsuccessfully if
-`torch.backends.mps.is_available()` is false.
+The script installs the project dependencies with `uv` and verifies that
+`torch.backends.mps.is_available()` is true. It does not install ComfyUI or
+download model weights.
 
-## ComfyUI And Phase 3 Setup
-
-Phase 3 requires a separate ComfyUI runtime, video model assets, and the
-VideoHelperSuite custom node. The local-video-platform virtual environment is
-not the ComfyUI environment; install ComfyUI dependencies only into ComfyUI's
-own `.venv`.
-
-### 1. Create The ComfyUI Environment
-
-Clone ComfyUI beside this project, create a Python 3.11 environment, and install
-its base requirements. Python 3.9 cannot run the current ComfyUI release.
+The equivalent manual setup is:
 
 ```sh
-cd ~/projects/AIML
-git clone https://github.com/comfyanonymous/ComfyUI.git
-cd ComfyUI
+uv sync
+uv run python -c 'import torch; print(torch.backends.mps.is_available())'
+```
 
+## ComfyUI Setup
+
+Set the ComfyUI location once per shell. The scripts default to this path:
+
+```sh
+export COMFYUI_DIR=/Users/kannan.s/projects/AIML/ComfyUI
+```
+
+Create the separate ComfyUI environment:
+
+```sh
+cd "$(dirname "$COMFYUI_DIR")"
+git clone https://github.com/comfyanonymous/ComfyUI.git ComfyUI
+cd "$COMFYUI_DIR"
 uv venv --python 3.11
 uv pip install --python .venv/bin/python -r requirements.txt
-
 if [ -f manager_requirements.txt ]; then
   uv pip install --python .venv/bin/python -r manager_requirements.txt
 fi
 ```
 
-If the checkout already exists, omit `git clone` and run the remaining commands
-from the ComfyUI directory. Confirm the environment can start ComfyUI:
+If the checkout already exists, skip `git clone`. Do not install ComfyUI
+dependencies into the project environment.
+
+### VideoHelperSuite
+
+`VHS_VideoCombine` is required for MP4 output and GIF generation. Install the
+custom node into ComfyUI:
 
 ```sh
-cd ~/projects/AIML/ComfyUI
-source .venv/bin/activate
-python main.py --listen 127.0.0.1 --port 8188
-```
-
-Keep this terminal open while ComfyUI is in use. A normal startup reports an MPS
-device and ends with the local GUI URL. `comfy-aimdo` warnings about macOS are
-informational when ComfyUI selects its eager backend.
-
-### 2. Install VideoHelperSuite
-
-Stop ComfyUI with `Ctrl+C`, then install VideoHelperSuite. It provides
-`VHS_LoadVideo` for continuation/inpainting inputs and `VHS_VideoCombine` for
-MP4 workflow outputs.
-
-```sh
-cd ~/projects/AIML/ComfyUI/custom_nodes
-
+mkdir -p "$COMFYUI_DIR/custom_nodes"
+cd "$COMFYUI_DIR/custom_nodes"
 if [ ! -d ComfyUI-VideoHelperSuite ]; then
   git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git
 fi
-
-cd ComfyUI-VideoHelperSuite
-
-if [ -f requirements.txt ]; then
-  uv pip install \
-    --python ~/projects/AIML/ComfyUI/.venv/bin/python \
-    -r requirements.txt
+if [ -f ComfyUI-VideoHelperSuite/requirements.txt ]; then
+  uv pip install --python "$COMFYUI_DIR/.venv/bin/python" \
+    -r ComfyUI-VideoHelperSuite/requirements.txt
 fi
 ```
 
-Some `uv` environments do not expose a standalone `pip` command. Use `uv pip`
-as above, or `python -m pip` after installing pip into the ComfyUI environment;
-do not run custom-node installs in `local-video-platform/.venv`.
-
-### 3. Download Video Model Assets
-
-Start with a complete **Wan 2.1 Text-to-Video 1.3B** asset bundle on Apple
-Silicon. It is a more practical initial model than a 14B variant on a 48 GB
-unified-memory system. The pipeline exposes an LTX-Video request option, but
-Wan 2.1 is the initial integration target; install one model family for the
-first verification run.
-
-In the ComfyUI web UI at `http://127.0.0.1:8188`, use Manager's model/workflow
-browser to select a Wan 2.1 T2V workflow and download every listed dependency.
-The bundle must include these model classes:
-
-- A Wan 2.1 T2V diffusion model in `models/diffusion_models/`
-- A UMT5 text encoder in `models/text_encoders/`
-- A Wan 2.1 VAE in `models/vae/`
-
-The Phase 3 request defaults expect filenames similar to
-`wan2.1_t2v_1.3B_fp16.safetensors`,
-`umt5_xxl_fp8_e4m3fn_scaled.safetensors`, and `wan_2.1_vae.safetensors`.
-The ComfyUI registry is authoritative: use its exact detected filenames in a
-`VideoGenerationRequest` when your downloaded filenames differ.
-
-To install the exact assets used by the default workflow directly from the
-Comfy-Org Hugging Face repository, run:
+Install FFmpeg separately if it is not already available:
 
 ```sh
-export COMFYUI_DIR=/Users/kannan.s/projects/AIML/ComfyUI
+brew install ffmpeg
+ffmpeg -version
+```
 
-mkdir -p \
-  "$COMFYUI_DIR/models/diffusion_models" \
+## Model Installation
+
+The application currently expects this model layout:
+
+| Feature | Model file | Folder | Approximate size |
+| --- | --- | --- | ---: |
+| Wan video | `wan2.1_t2v_1.3B_fp16.safetensors` | `models/diffusion_models` | 2.6 GB |
+| Wan text encoder | `umt5_xxl_fp8_e4m3fn_scaled.safetensors` | `models/text_encoders` | 6.3 GB |
+| Wan VAE | `wan_2.1_vae.safetensors` | `models/vae` | 242 MB |
+| LTX video | `ltxv-13b-0.9.8-distilled-fp8.safetensors` | `models/checkpoints` | 15.69 GB |
+| LTX text encoder | `t5xxl_fp8_e4m3fn_scaled.safetensors` | `models/text_encoders` | 4.8 GB |
+| FLUX still image | `flux1-schnell-fp8.safetensors` | `models/checkpoints` | 17.2 GB |
+
+The local `du` output may show binary units, for example 15G or 16G. The LTX
+file's exact size is `15,694,280,140` bytes, which is 15.69 GB decimal or
+14.62 GiB.
+
+Create the directories before downloading:
+
+```sh
+mkdir -p "$COMFYUI_DIR/models/diffusion_models" \
+  "$COMFYUI_DIR/models/checkpoints" \
   "$COMFYUI_DIR/models/text_encoders" \
   "$COMFYUI_DIR/models/vae"
+```
 
-curl -L --fail \
+### Wan 2.1
+
+```sh
+curl -L --fail --retry 10 --retry-delay 5 --continue-at - \
   -o "$COMFYUI_DIR/models/diffusion_models/wan2.1_t2v_1.3B_fp16.safetensors" \
   "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/diffusion_models/wan2.1_t2v_1.3B_fp16.safetensors"
-
-curl -L --fail \
+curl -L --fail --retry 10 --retry-delay 5 --continue-at - \
   -o "$COMFYUI_DIR/models/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors" \
   "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors"
-
-curl -L --fail \
+curl -L --fail --retry 10 --retry-delay 5 --continue-at - \
   -o "$COMFYUI_DIR/models/vae/wan_2.1_vae.safetensors" \
   "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors"
 ```
 
-Restart ComfyUI after the downloads finish so the loader registry discovers
-the new files. These assets are large; an interrupted download can leave a
-truncated safetensors file that must be deleted and downloaded again.
+### LTX-Video 13B
 
-### 4. Restart And Verify ComfyUI
-
-Restart ComfyUI after adding custom nodes or model files:
+The distilled FP8 checkpoint replaces the older LTX 2B reference:
 
 ```sh
-cd ~/projects/AIML/ComfyUI
-source .venv/bin/activate
-python main.py --listen 127.0.0.1 --port 8188
+curl -L --fail --retry 10 --retry-delay 5 --continue-at - \
+  -o "$COMFYUI_DIR/models/checkpoints/ltxv-13b-0.9.8-distilled-fp8.safetensors" \
+  "https://huggingface.co/Lightricks/LTX-Video/resolve/main/ltxv-13b-0.9.8-distilled-fp8.safetensors"
+curl -L --fail --retry 10 --retry-delay 5 --continue-at - \
+  -o "$COMFYUI_DIR/models/text_encoders/t5xxl_fp8_e4m3fn_scaled.safetensors" \
+  "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp8_e4m3fn_scaled.safetensors"
 ```
 
-From another terminal, query the registered nodes and model choices:
+For an exact-size check after downloading:
 
 ```sh
-cd ~/projects/AIML/local-video-platform
-curl --fail --silent http://127.0.0.1:8188/object_info > /tmp/comfy-object-info.json
+test "$(wc -c < "$COMFYUI_DIR/models/checkpoints/ltxv-13b-0.9.8-distilled-fp8.safetensors" | tr -d ' ')" = "15694280140"
+test "$(wc -c < "$COMFYUI_DIR/models/text_encoders/t5xxl_fp8_e4m3fn_scaled.safetensors" | tr -d ' ')" = "5157348688"
+```
 
+### FLUX.1 Schnell FP8
+
+FLUX powers still images in Photo, 3D render, Graphic, and Art styles. The
+combined checkpoint is loaded from `models/checkpoints` by the current workflow:
+
+```sh
+curl -L --fail --retry 10 --retry-delay 5 --continue-at - \
+  -o "$COMFYUI_DIR/models/checkpoints/flux1-schnell-fp8.safetensors" \
+  "https://huggingface.co/Comfy-Org/flux1-schnell/resolve/main/flux1-schnell-fp8.safetensors"
+```
+
+Use a `.part` suffix and atomically rename the file when downloading to a new
+machine. This prevents ComfyUI from discovering a partially downloaded model:
+
+```sh
+curl -L --fail --retry 10 --retry-delay 5 --continue-at - \
+  -o "$COMFYUI_DIR/models/checkpoints/flux1-schnell-fp8.safetensors.part" \
+  "https://huggingface.co/Comfy-Org/flux1-schnell/resolve/main/flux1-schnell-fp8.safetensors"
+mv "$COMFYUI_DIR/models/checkpoints/flux1-schnell-fp8.safetensors.part" \
+  "$COMFYUI_DIR/models/checkpoints/flux1-schnell-fp8.safetensors"
+```
+
+### Remove the old LTX 2B checkpoint
+
+Only remove the old file after the 13B file exists and passes its size check:
+
+```sh
+test -f "$COMFYUI_DIR/models/checkpoints/ltxv-13b-0.9.8-distilled-fp8.safetensors" \
+  && rm -f "$COMFYUI_DIR/models/checkpoints/ltx-video-2b-v0.9.safetensors"
+```
+
+## Verify ComfyUI
+
+Restart ComfyUI after adding models or custom nodes:
+
+```sh
+cd "$COMFYUI_DIR"
+"$COMFYUI_DIR/.venv/bin/python" main.py --listen 127.0.0.1 --port 8188
+```
+
+In another terminal, verify that ComfyUI is reachable and has the required
+node registry:
+
+```sh
+curl --fail --silent http://127.0.0.1:8188/object_info > /tmp/comfy-object-info.json
 uv run python - <<'PY'
 import json
 
-with open("/tmp/comfy-object-info.json") as file:
+with open('/tmp/comfy-object-info.json') as file:
     nodes = json.load(file)
 
-for node_name, field in (
-    ("UNETLoader", "unet_name"),
-    ("CLIPLoader", "clip_name"),
-    ("VAELoader", "vae_name"),
-    ("VHS_VideoCombine", "format"),
-    ("VHS_LoadVideo", "video"),
-):
-    node = nodes.get(node_name)
-    value = "MISSING" if node is None else node["input"]["required"][field][0]
-    print(f"{node_name}.{field}: {value}")
+for name in ('CheckpointLoaderSimple', 'CLIPLoader', 'EmptyLTXVLatentVideo',
+             'VHS_VideoCombine', 'KSampler', 'ConditioningZeroOut'):
+    print(f'{name}: {"OK" if name in nodes else "MISSING"}')
 PY
 ```
 
-The three loader entries must list the installed Wan/LTX assets, and both VHS
-entries must be present before starting an end-to-end Phase 3 inference test.
-The server's `object_info` schema is authoritative: verify its node input names
-and model filenames before submitting a production render.
-
-### 5. Run Phase 3 Checks
-
-With ComfyUI running and the registry verification passing, validate the Python
-modules and submit a text-to-video request:
+Also inspect the actual files ComfyUI can see:
 
 ```sh
-cd ~/projects/AIML/local-video-platform
-uv run python -m compileall -q backend
-uv run python -m backend.pipeline.t2v
+find "$COMFYUI_DIR/models" -maxdepth 2 -type f \
+  \( -name '*.safetensors' -o -name '*.ckpt' \) -print | sort
 ```
-
-`backend.pipeline.t2v` submits a 121-frame, 24 fps Wan request. Generated MP4
-files are stored in `backend/storage/exports/<run-id>/`; raw latents are copied
-to `backend/storage/latents/<run-id>/`. The pipeline modules and VideoToolbox
-composition have been smoke-tested locally; a successful render through the
-installed Wan/LTX model remains the required final end-to-end verification.
-
-## Configuration
-
-Settings are defined in [backend/config.py](backend/config.py) and can be
-overridden with environment variables or a `.env` file in the repository root.
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `PROJECT_ROOT` | Repository root | Base path for the project |
-| `MODEL_CHECKPOINTS_DIR` | `backend/storage/model_checkpoints` | Model checkpoint files |
-| `TEMP_FRAMES_DIR` | `backend/storage/temp_frames` | Temporary generated frames |
-| `LATENTS_DIR` | `backend/storage/latents` | Session latent files |
-| `EXPORTS_DIR` | `backend/storage/exports` | Rendered video exports |
-| `VIDEO_WIDTH` | `746` | Video width in pixels |
-| `VIDEO_HEIGHT` | `420` | Video height in pixels |
-| `FRAME_RATE` | `24` | Frames per second |
-| `OLLAMA_API_URL` | `http://localhost:11434` | Ollama service URL |
-| `COMFYUI_DIR` | `/Users/kannan.s/projects/AIML/ComfyUI` | ComfyUI checkout containing `main.py` |
-| `COMFYUI_PYTHON` | `$COMFYUI_DIR/.venv/bin/python` | Python interpreter from the ComfyUI environment |
-| `COMFYUI_HOST` | `127.0.0.1` | Host used for the managed ComfyUI process |
-| `COMFYUI_PORT` | `8188` | Port used for the managed ComfyUI process |
-| `FRONTEND_DIR` | `frontend` | Next.js application directory |
-| `FRONTEND_HOST` | `127.0.0.1` | Host used for the managed frontend process |
-| `FRONTEND_PORT` | `3000` | Port used for the managed frontend process |
-
-The default video format is `746x420` at 24 fps. Portrait video can be selected
-with `VIDEO_WIDTH=420` and `VIDEO_HEIGHT=746`.
-
-The API creates all four storage directories during application startup. No
-model checkpoints or generated media are included in Phase 1.
 
 ## Run The Studio
 
-Start ComfyUI once with the managed server script:
+The managed launcher starts ComfyUI, the Next.js frontend, and FastAPI:
 
 ```sh
 ./scripts/start_server.sh
 ```
 
-For subsequent integrated runs, use the all-in-one launcher:
+It uses `COMFYUI_DIR`, `COMFYUI_PYTHON`, `COMFYUI_HOST`, and `COMFYUI_PORT` if
+you need a non-default ComfyUI checkout. The studio is available at
+`http://127.0.0.1:3000`, FastAPI at `http://127.0.0.1:8000`, and ComfyUI at
+`http://127.0.0.1:8188`.
+
+Alternatively, `run_local_studio.sh` reuses an already-running ComfyUI and
+starts the project services while following `backend/storage/comfyui.log`:
 
 ```sh
 ./run_local_studio.sh
 ```
 
-The launcher verifies or starts Ollama, verifies ComfyUI on port 8188, and
-starts FastAPI and Next.js only when they are not already healthy. It follows
-new entries in `backend/storage/comfyui.log`, so model loading, sampler progress,
-encoding, backend job IDs, failures, and export paths are visible in one
-terminal. Press `Ctrl+C` to stop processes owned by that launcher; pre-existing
-healthy services are reused and left running.
-
-The studio is available at <http://127.0.0.1:3000>, FastAPI at
-<http://127.0.0.1:8000>, and ComfyUI at <http://127.0.0.1:8188>.
-
-### Development Launcher
-
-Start the development server with hot reload:
-
-```sh
-./scripts/start_server.sh
-```
-
-`start_server.sh` starts ComfyUI when it is not already running, waits until its
-`/system_stats` endpoint is ready, starts the Next.js frontend, and then starts
-the FastAPI server. Configure a non-default ComfyUI checkout or interpreter for
-that invocation:
-
-```sh
-COMFYUI_DIR="$HOME/src/ComfyUI" COMFYUI_PYTHON="$HOME/src/ComfyUI/.venv/bin/python" ./scripts/start_server.sh
-```
-
-When ComfyUI is already running on `COMFYUI_HOST:COMFYUI_PORT`, the script uses
-that existing process without taking ownership of it. The FastAPI command is:
-
-```sh
-uv run uvicorn backend.api.main:app --reload --host 127.0.0.1 --port 8000
-```
-
-The web studio is available at <http://127.0.0.1:3000>; the FastAPI service is
-available at <http://127.0.0.1:8000>.
-
-Stop the server from another terminal with:
+Use only one launcher for a given run. Neither launcher downloads model weights.
+Stop managed services with:
 
 ```sh
 ./scripts/stop_server.sh
 ```
 
-Use `stop_server.sh` to stop all managed processes. When running the server in
-the foreground, `Ctrl+C` stops the FastAPI process; run `stop_server.sh` to also
-stop managed ComfyUI and frontend processes.
+## Generation Modes
 
-## Phase 5 Web Studio
+In the chat composer, select **Video** or **Image**.
 
-The frontend is a Next.js App Router application in `frontend/`. It provides a
-responsive dark workspace with project history, backend connection state, a
-multiline generation prompt, reference-image selection, 16:9 and 9:16 output
-selection, generation progress, completed-video cards, active-render
-cancellation, and pending-queue clearing.
+### Video
 
-Completed-video cards include custom playback controls, looping, a scrubber,
-timestamp display, MP4 download, and a paused-frame brush overlay. Brush
-strokes are stored as normalized canvas-mask data in the browser and are ready
-to be submitted to the Phase 3 inpainting pipeline when that API endpoint is
-connected.
+Video supports the existing Wan 2.1 and LTX-Video 13B workflows. LTX requires
+width and height divisible by 32 and a frame count of `8n + 1`. The tested
+small profile is 512x288 with 49 frames. Portrait output swaps the dimensions.
 
-Install the frontend dependencies after cloning the repository:
+### Still image
 
-```sh
-cd frontend
-npm install
-```
+Select **Image**, choose `1:1`, `16:9`, or `9:16`, then choose Photo, 3D
+render, Graphic, or Art. These styles use FLUX.1 Schnell FP8 with four steps.
 
-For frontend-only development, start Next.js directly:
+### Animated GIF
+
+Select **Image -> Animated GIF**. The request is routed to LTX-Video 13B for a
+49-frame, 12 fps clip, then FFmpeg converts the generated MP4 to
+`image.gif`. GIF generation uses LTX, not FLUX, and therefore takes longer than
+a still image.
+
+Direct GIF WebSocket smoke test:
 
 ```sh
-cd frontend
-npm run dev
+cd /Users/kannan.s/projects/AIML/local-video-platform
+uv run python - <<'PY'
+import asyncio
+import json
+import websockets
+
+async def main():
+    payload = {
+        'generation_type': 'image',
+        'style': 'gif',
+        'prompt': 'A colorful parrot eating watermelon, gently bobbing its head, seamless loop',
+        'aspect_ratio': '16:9',
+        'seed': 73,
+    }
+    async with websockets.connect('ws://127.0.0.1:8000/ws/generation') as socket:
+        await socket.send(json.dumps(payload))
+        while True:
+            event = json.loads(await socket.recv())
+            print(event)
+            if event.get('type') in {'complete', 'error'}:
+                break
+
+asyncio.run(main())
+PY
 ```
 
-Use `./scripts/start_server.sh` for the normal integrated development workflow;
-it manages ComfyUI, Next.js, and FastAPI together.
+Completed media is stored in `backend/storage/exports/<run-id>/` and served at
+`http://127.0.0.1:8000/exports/<run-id>/<filename>`.
 
-### WebSocket Contract
+## WebSocket Contract
 
-The frontend connects to `ws://localhost:8000/ws/generation` and sends a
-generation request like this:
+Connect to `ws://127.0.0.1:8000/ws/generation`. Video requests use the existing
+video payload. Image requests use this shape:
 
 ```json
 {
-  "prompt": "A cinematic mountain landscape at sunrise",
+  "generation_type": "image",
+  "style": "3d",
+  "prompt": "A glass greenhouse on a red desert planet",
   "aspect_ratio": "16:9",
-  "quality": "draft",
-  "width": 512,
-  "height": 288,
-  "frames": 49,
-  "steps": 12,
-  "cfg": 5.0,
-  "fps": 16,
-  "seed": 73,
-  "reference_name": "optional-reference.png"
+  "seed": 73
 }
 ```
 
-The backend submits the workflow to ComfyUI asynchronously and streams
-`accepted`, `progress`, `complete`, `error`, and `cancelled` events. Progress
-events contain `job_id`, `progress`, `status`, `message`, and `node`. A complete
-event includes the generated `run_id` and a `video_url` beneath `/exports`.
+The server emits `accepted`, `progress`, `complete`, `error`, and `cancelled`
+events. Still-image and GIF completion events contain `image_url`; video
+completion events contain `video_url`. Lifecycle events are logged even when
+ComfyUI does not provide a numeric percentage.
 
-The web studio defaults to the tested 512x288 profile. It completed in 410.58
-seconds (about 7 minutes) on the M4 Pro. The composer shows an estimated render
-time, and the Studio Settings button allows resolution, frame count, sampling
-steps, CFG, FPS, and seed to be changed before submitting a prompt. The estimate
-scales from that local benchmark using resolution, frames, and steps; model
-warm-up and memory pressure can make actual time vary.
+## Validation
 
-### Quality Presets
-
-| Preset | Resolution | Frames | FPS | Steps | CFG |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| `draft` | `512x288` | 49 | 16 | 12 | 5.0 |
-| `final` | `746x420` | 121 | 24 | 20 | 5.5 |
-
-Portrait requests swap the preset width and height. API callers may override
-`width`, `height`, `frames`, `fps`, `steps`, `cfg`, and `seed`; the studio UI
-sends its current settings with every request. Backend Draft defaults can also
-be changed in `.env` with `GENERATION_WIDTH`, `GENERATION_HEIGHT`,
-`GENERATION_FRAMES`, `GENERATION_STEPS`, `GENERATION_CFG`, `GENERATION_FPS`, and
-`GENERATION_SEED`.
-
-## HTTP API
-
-### `GET /health`
-
-Check service and runtime state:
+Run these checks from the repository root:
 
 ```sh
-curl http://127.0.0.1:8000/health
+uv run python -m compileall -q backend
+npm --prefix frontend run lint
+npm --prefix frontend run build
 ```
 
-The JSON response includes the service status, timestamp, Python and PyTorch
-versions, MPS availability, disk capacity, storage paths, video settings, and
-the configured Ollama URL.
-
-### `POST /generate`
-
-Queue a Draft render without blocking the HTTP response:
+Check service health and the ComfyUI queue:
 
 ```sh
-curl --fail --silent --show-error \
-  -X POST http://127.0.0.1:8000/generate \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "prompt": "A bright red paper boat drifting through a rain puddle",
-    "negative_prompt": "blurry, distorted, text, watermark",
-    "aspect_ratio": "16:9",
-    "quality": "draft",
-    "width": 512,
-    "height": 288,
-    "frames": 49,
-    "steps": 12,
-    "cfg": 5.0,
-    "fps": 16,
-    "seed": 73
-  }'
-```
-
-The response is `202 Accepted` with a platform job ID. Completed videos and
-latents are written beneath `backend/storage/exports/<job-id>/`, while a latent
-copy for continuation is stored beneath `backend/storage/latents/<job-id>/`.
-
-### `POST /extend` And `POST /inpaint`
-
-`/extend` dispatches image-conditioned continuation through `pipeline/i2v.py`.
-It accepts the generation fields plus `previous_run_id`. `/inpaint` dispatches
-spatial inpainting through `pipeline/inpaint.py` and accepts the generation
-fields plus export-relative `source_video` and `mask` paths.
-
-### Queue Controls
-
-Cancel the active ComfyUI workflow:
-
-```sh
-curl --fail --silent --show-error -X POST \
-  http://127.0.0.1:8000/generation/cancel
-```
-
-Clear workflows waiting behind the active render:
-
-```sh
-curl --fail --silent --show-error -X POST \
-  http://127.0.0.1:8000/generation/clear-queue
-```
-
-The Ban and List-X buttons in the studio header expose the same controls.
-
-### `WS /ws/generation`
-
-Connect to:
-
-```text
-ws://127.0.0.1:8000/ws/generation
-```
-
-Send the same generation JSON used by `/generate`. The connection remains open
-and carries real-time ComfyUI progress followed by completion or error events.
-For example:
-
-```json
-{"prompt":"A cinematic mountain landscape at sunrise","quality":"draft","aspect_ratio":"16:9"}
-```
-
-### Exported Media
-
-FastAPI mounts `backend/storage/exports` at `/exports`. A completed video is
-available at a URL such as:
-
-```text
-http://127.0.0.1:8000/exports/<job-id>/video_00001.mp4
-```
-
-### Temporary Frame Cleanup
-
-Remove temporary frame batches older than 24 hours without touching final MP4
-exports, latents, or session metadata:
-
-```sh
-uv run python -m backend.storage.cleaner
-```
-
-Python callers can use `purge_orphaned_frame_batches(max_age_hours=24)` to
-choose another retention period.
-
-## Project Layout
-
-```text
-backend/
-  api/main.py             FastAPI app, lifespan, health, and export mount
-  api/routes.py           Async generation routes, dispatcher, and queue controls
-  config.py               Pydantic Settings and storage paths
-  storage/
-    cleaner.py            Stale temporary-frame cleanup
-    model_checkpoints/    Model checkpoint files
-    temp_frames/          Temporary frame scratchpad
-    latents/              Session latent files
-    exports/              Final exports
-scripts/
-  setup_env.sh            Initialize, install, and verify MPS
-  start_server.sh         Start managed ComfyUI, frontend, and FastAPI services
-  stop_server.sh          Stop managed ComfyUI, frontend, and FastAPI services
-run_local_studio.sh       Reuse/start services and stream local logs
-frontend/
-  src/app/                Next.js App Router studio shell and styles
-  src/components/player/  Video controls and canvas brush overlay
-  src/hooks/              WebSocket transport hook
-  src/lib/store.ts        Zustand studio, playback, and mask state
-pyproject.toml            Project metadata and dependencies
-uv.lock                   Reproducible dependency lockfile
+curl --fail http://127.0.0.1:8000/health
+curl --fail http://127.0.0.1:8188/queue
 ```
 
 ## Troubleshooting
 
-If setup reports that MPS is unavailable, confirm that the terminal is using a
-native Apple Silicon Python environment and rerun:
+### Model not found
+
+Check the exact filename and folder in the model table, remove any `.part`
+file, restart ComfyUI, and query `/object_info` again. ComfyUI's registry is
+the authority for the names exposed to workflows.
+
+### LTX or GIF errors
+
+Confirm the LTX checkpoint, T5-XXL encoder, VideoHelperSuite, and `ffmpeg` are
+installed. LTX dimensions must be divisible by 32 and frames must equal
+`8n + 1`. Lower the GIF dimensions if MPS memory is tight.
+
+### Progress appears in the UI but not the terminal
+
+Inspect both `backend/storage/comfyui.log` and the FastAPI terminal. The backend
+logs numeric progress and lifecycle events. A completion event must include an
+export path; an FFmpeg failure during GIF conversion is reported as an error.
+
+### MPS is unavailable
+
+Use a native Apple Silicon Python and run:
 
 ```sh
 uv run python -c 'import torch; print(torch.backends.mps.is_available())'
 ```
 
-If port 8000 is already occupied, use another port:
+### Truncated safetensors file
 
-```sh
-uv run uvicorn backend.api.main:app --reload --host 127.0.0.1 --port 8001
+An error such as `SafetensorError: incomplete metadata` means the download is
+incomplete. Delete the affected file, repeat the resumable download, verify its
+size, and restart ComfyUI.
+
+## Project Layout
+
+```text
+backend/                 FastAPI routes, ComfyUI client, and pipelines
+backend/storage/         exports, latents, logs, and runtime PID files
+frontend/                Next.js studio and WebSocket client
+scripts/setup_env.sh     project dependency and MPS setup
+scripts/start_server.sh  managed ComfyUI, frontend, and FastAPI startup
+scripts/stop_server.sh   managed process shutdown
+run_local_studio.sh      reuse services and follow local ComfyUI logs
+pyproject.toml           project dependencies and uv metadata
 ```
-
-If a job remains at 0%, follow ComfyUI's native log. The first percentage is
-emitted only after the first sampler step completes:
-
-```sh
-tail -f backend/storage/comfyui.log
-```
-
-Verify the queue independently:
-
-```sh
-curl --fail --silent http://127.0.0.1:8188/queue
-```
-
-VideoHelperSuite warnings that default `pix_fmt` to `yuv420p`, `crf` to 19,
-metadata to true, and audio trimming to false are informational. A successful
-render ends with `Prompt executed in ...`, an empty queue, and an MP4 beneath
-the matching export directory.
-
-If ComfyUI reports `SafetensorError: incomplete metadata, file not fully
-covered`, the referenced model download is truncated. Delete and re-download
-that model, verify its remote content length, and restart ComfyUI.

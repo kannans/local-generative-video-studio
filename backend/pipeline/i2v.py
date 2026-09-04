@@ -9,6 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 from uuid import uuid4
 
+from backend.inference.comfy_client import ComfyProgressEvent
 from backend.pipeline.t2v import GeneratedVideo, TextToVideoEngine, VideoGenerationRequest
 
 
@@ -37,7 +38,7 @@ class VideoContinuationEngine:
         workflow["7"]["inputs"]["latent_image"] = ["6", 0]
         return workflow
 
-    async def continue_video(self, previous: GeneratedVideo, request: VideoGenerationRequest, run_id: str | None = None, progress_callback: Callable[[object], Awaitable[None]] | None = None) -> GeneratedVideo:
+    async def continue_video(self, previous: GeneratedVideo, request: VideoGenerationRequest, run_id: str | None = None, progress_callback: Callable[[ComfyProgressEvent], Awaitable[None]] | None = None) -> GeneratedVideo:
         """Create a five-second continuation retaining the previous segment's visual state."""
         continuation = replace(request, frames=request.fps * 5)
         frame = self.extract_final_frame(previous.video_path)

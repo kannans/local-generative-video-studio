@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from backend.inference.comfy_client import ComfyUIClientError
+from backend.inference.comfy_client import ComfyProgressEvent, ComfyUIClientError
 from backend.pipeline.t2v import GeneratedVideo, TextToVideoEngine, VideoGenerationRequest
 
 
@@ -46,7 +46,7 @@ class SpatialInpaintEngine:
         })
         return workflow
 
-    async def inpaint(self, source_video: Path, mask: Path, request: VideoGenerationRequest, run_id: str, progress_callback: Callable[[object], Awaitable[None]] | None = None) -> GeneratedVideo:
+    async def inpaint(self, source_video: Path, mask: Path, request: VideoGenerationRequest, run_id: str, progress_callback: Callable[[ComfyProgressEvent], Awaitable[None]] | None = None) -> GeneratedVideo:
         """Upload source and mask, then render only the masked latent region."""
         if not source_video.is_file() or not mask.is_file():
             raise FileNotFoundError("source_video and mask must both exist")
