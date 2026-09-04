@@ -14,7 +14,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, WebSocket, WebSoc
 from pydantic import BaseModel, Field
 
 from backend.config import settings
-from backend.inference.comfy_client import ComfyProgressEvent, ComfyUIClient
+from backend.inference.comfy_client import ComfyProgressEvent, ComfyUIClient, ComfyUIClientError
 from backend.pipeline.image import GeneratedImage, ImageGenerationEngine, ImageGenerationRequest, ImageStyle
 from backend.pipeline.i2v import VideoContinuationEngine
 from backend.pipeline.inpaint import SpatialInpaintEngine
@@ -200,6 +200,22 @@ class GenerationDispatcher:
         await self.broadcast({"type": "progress", "job_id": job_id, "status": "queued", "progress": 0})
         try:
             generated = await factory(report, job_id)
+        except ComfyUIClientError as error:
+            if str(error) == "Generation interrupted":
+                logger.info("Generation job %s cancelled", job_id)
+                await self.broadcast(
+                    {
+                        "type": "cancelled",
+                        "job_id": job_id,
+                        "status": "cancelled",
+                        "progress": 0,
+                        "message": "Generation cancelled",
+                    }
+                )
+                return
+            logger.exception("Generation job %s failed: %s", job_id, error)
+            await self.broadcast({"type": "error", "job_id": job_id, "status": "failed", "progress": 0, "message": str(error)})
+            return
         except Exception as error:
             logger.exception("Generation job %s failed: %s", job_id, error)
             await self.broadcast({"type": "error", "job_id": job_id, "status": "failed", "progress": 0, "message": str(error)})
