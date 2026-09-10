@@ -11,7 +11,7 @@ from urllib.parse import quote
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from backend.config import settings
 from backend.inference.comfy_client import ComfyProgressEvent, ComfyUIClient, ComfyUIClientError
@@ -103,11 +103,13 @@ class ImageGenerationPayload(BaseModel):
                 "16:9": (512, 288),
                 "9:16": (288, 512),
             }[self.aspect_ratio]
+        elif self.width is not None and self.height is not None:
+            width, height = self.width, self.height
         return ImageGenerationRequest(
             prompt=self.prompt,
             style=self.style,
-            width=width if self.width is None or self.style == "gif" else self.width,
-            height=height if self.height is None or self.style == "gif" else self.height,
+            width=_align_image_dimension(width),
+            height=_align_image_dimension(height),
             steps=self.steps,
             seed=self.seed,
         )
@@ -254,6 +256,11 @@ class GenerationDispatcher:
 dispatcher = GenerationDispatcher()
 
 
+def _align_image_dimension(value: int) -> int:
+    """Snap FLUX latent sizes to the 16-pixel grid required by EmptySD3LatentImage."""
+    return max(64, value - (value % 16))
+
+
 def export_url(video_path: Path) -> str:
     """Return a URL beneath the exports static mount for a generated video."""
     relative_path = video_path.resolve().relative_to(settings.exports_dir.resolve())
@@ -346,28 +353,35 @@ async def generation_websocket(websocket: WebSocket) -> None:
     try:
         while True:
             raw_payload = await websocket.receive_json()
-            if raw_payload.get("generation_type") == "image":
-                image_request = ImageGenerationPayload.model_validate(raw_payload).to_request()
+            try:
+                if raw_payload.get("generation_type") == "image":
+                    image_request = ImageGenerationPayload.model_validate(raw_payload).to_request()
 
-                async def image_job(
-                    report: Callable[[ComfyProgressEvent], Awaitable[None]],
-                    run_id: str,
-                    request: ImageGenerationRequest = image_request,
-                ) -> GeneratedImage:
-                    return await dispatcher.image.generate(request, run_id, report)
+                    async def image_job(
+                        report: Callable[[ComfyProgressEvent], Awaitable[None]],
+                        run_id: str,
+                        request: ImageGenerationRequest = image_request,
+                    ) -> GeneratedImage:
+                        return await dispatcher.image.generate(request, run_id, report)
 
-                job = image_job
-            else:
-                video_request = GenerationPayload.model_validate(raw_payload).to_request()
+                    job = image_job
+                else:
+                    video_request = GenerationPayload.model_validate(raw_payload).to_request()
 
-                async def video_job(
-                    report: Callable[[ComfyProgressEvent], Awaitable[None]],
-                    run_id: str,
-                    request: VideoGenerationRequest = video_request,
-                ) -> GeneratedVideo:
-                    return await dispatcher.text_to_video.run_and_wait(request, run_id, report)
+                    async def video_job(
+                        report: Callable[[ComfyProgressEvent], Awaitable[None]],
+                        run_id: str,
+                        request: VideoGenerationRequest = video_request,
+                    ) -> GeneratedVideo:
+                        return await dispatcher.text_to_video.run_and_wait(request, run_id, report)
 
-                job = video_job
+                    job = video_job
+            except (ValidationError, ValueError) as error:
+                logger.warning("Rejected generation request: %s", error)
+                await websocket.send_json(
+                    {"type": "error", "status": "failed", "progress": 0, "message": str(error)}
+                )
+                continue
 
             await websocket.send_json({"type": "accepted", "job_id": dispatcher.start(job), "status": "queued", "progress": 0})
     except WebSocketDisconnect:

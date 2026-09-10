@@ -346,7 +346,7 @@ settings to choose an image quality profile:
 | --- | ---: | ---: | ---: | ---: | --- |
 | Draft | 512x512 | 768x432 | 432x768 | 4 | Faster previews and lower memory use |
 | Standard | 768x768 | 1024x576 | 576x1024 | 4 | Default balanced profile |
-| High | 1024x1024 | 1152x648 | 648x1152 | 8 | More detail at higher memory cost |
+| High | 1024x1024 | 1152x640 | 640x1152 | 8 | More detail at higher memory cost |
 
 Width, height, steps, and seed can also be edited directly. Image dimensions
 must be at least 64 pixels and divisible by 16. Increasing resolution is the

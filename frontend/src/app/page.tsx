@@ -14,7 +14,11 @@ type ImageQuality = "draft" | "standard" | "high";
 type GenerationSettings = { model: VideoModel; width: number; height: number; frames: number; steps: number; cfg: number; fps: number; seed: number };
 type ImageSettings = { quality: ImageQuality; width: number; height: number; steps: number; seed: number };
 const defaultGenerationSettings: GenerationSettings = { model: "wan-2.1", width: 512, height: 288, frames: 49, steps: 12, cfg: 5.0, fps: 16, seed: 73 };
-const defaultImageSettings: ImageSettings = { quality: "standard", width: 768, height: 768, steps: 4, seed: 73 };
+const defaultImageSettings: ImageSettings = { quality: "standard", width: 1024, height: 576, steps: 4, seed: 73 };
+
+function alignImageDimension(value: number) {
+  return Math.max(64, value - (value % 16));
+}
 
 function estimatedRenderSeconds(settings: GenerationSettings) {
   const benchmarkWork = 512 * 288 * 49 * 12;
@@ -60,7 +64,7 @@ export default function Home() {
     const dimensions = {
       draft: { "1:1": [512, 512], "16:9": [768, 432], "9:16": [432, 768] },
       standard: { "1:1": [768, 768], "16:9": [1024, 576], "9:16": [576, 1024] },
-      high: { "1:1": [1024, 1024], "16:9": [1152, 648], "9:16": [648, 1152] },
+      high: { "1:1": [1024, 1024], "16:9": [1152, 640], "9:16": [640, 1152] },
     } as const;
     const [width, height] = dimensions[quality][selectedRatio];
     setImageSettings((current) => ({ ...current, quality, width, height, steps: quality === "high" ? 8 : 4 }));
@@ -76,7 +80,7 @@ export default function Home() {
     if (!value || isGenerating) return;
     addMessage({ id: crypto.randomUUID(), role: "user", content: value, createdAt: new Date().toISOString() });
     if (mode === "image") {
-      sendGeneration({ generation_type: "image", prompt: value, style: imageStyle, aspect_ratio: ratio, width: imageSettings.width, height: imageSettings.height, steps: imageSettings.steps, seed: imageSettings.seed }, imageStyle === "gif" ? "not calibrated" : "about 1 min");
+      sendGeneration({ generation_type: "image", prompt: value, style: imageStyle, aspect_ratio: ratio, width: alignImageDimension(imageSettings.width), height: alignImageDimension(imageSettings.height), steps: imageSettings.steps, seed: imageSettings.seed }, imageStyle === "gif" ? "not calibrated" : "about 1 min");
     } else {
       sendGeneration({ generation_type: "video", prompt: value, aspect_ratio: ratio === "1:1" ? "16:9" : ratio, quality: "draft", ...generationSettings, reference_name: file?.name }, renderEstimate);
     }
@@ -88,6 +92,7 @@ export default function Home() {
   function selectMode(nextMode: GenerationMode) {
     setMode(nextMode);
     if (nextMode === "video" && ratio === "1:1") setRatio("16:9");
+    if (nextMode === "image") selectImageQuality(imageSettings.quality, ratio === "1:1" ? "1:1" : ratio);
   }
 
   function selectRatio(nextRatio: AspectRatio) {
