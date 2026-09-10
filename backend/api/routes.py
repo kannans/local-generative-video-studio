@@ -19,9 +19,21 @@ from backend.pipeline.image import GeneratedImage, ImageGenerationEngine, ImageG
 from backend.pipeline.i2v import VideoContinuationEngine
 from backend.pipeline.inpaint import SpatialInpaintEngine
 from backend.pipeline.t2v import GeneratedVideo, TextToVideoEngine, VideoGenerationRequest
+from backend.pipeline.voice import VoiceEngine, VoiceRequest, voice_status
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+class VoicePayload(BaseModel):
+    """Optional post-video voiceover. Kokoro is Fast; qwen-base clones a reference WAV."""
+
+    model: Literal["off", "kokoro", "qwen-base"] = "off"
+    gender: Literal["female", "male"] = "female"
+    script: str = ""
+
+    def to_request(self) -> VoiceRequest:
+        return VoiceRequest(model=self.model, gender=self.gender, script=self.script)
 
 
 class GenerationPayload(BaseModel):
@@ -39,6 +51,7 @@ class GenerationPayload(BaseModel):
     fps: int | None = Field(default=None, gt=0)
     steps: int | None = Field(default=None, gt=0)
     cfg: float | None = Field(default=None, gt=0)
+    voice: VoicePayload = Field(default_factory=VoicePayload)
 
     def to_request(self) -> VideoGenerationRequest:
         if self.quality == "draft":
@@ -142,6 +155,7 @@ class GenerationDispatcher:
         self.image = ImageGenerationEngine(client, text_to_video)
         self.continuation = VideoContinuationEngine(text_to_video)
         self.inpaint_engine = SpatialInpaintEngine(text_to_video)
+        self.voice = VoiceEngine()
         self.connections: set[WebSocket] = set()
         self.tasks: set[asyncio.Task[None]] = set()
 
@@ -294,10 +308,28 @@ def previous_video(run_id: str) -> GeneratedVideo:
     return GeneratedVideo(run_id, "", video, latent, (video, latent), VideoGenerationRequest(prompt="Continuation source"))
 
 
+@router.get("/voice")
+async def voice_capabilities() -> dict[str, object]:
+    """Installed TTS engines and whether male/female reference clips exist."""
+    status = voice_status()
+    return {
+        "available": list(status.available),
+        "optional": list(status.optional),
+        "default": status.default,
+        "references": status.references,
+        "install_hint": status.install_hint,
+        "voices_dir": str(settings.voices_dir),
+    }
+
+
 @router.post("/generate", status_code=202)
 async def generate(payload: GenerationPayload, background_tasks: BackgroundTasks) -> dict[str, str]:
+    video_request = payload.to_request()
+    voice_request = payload.voice.to_request()
+
     async def job(report: Callable[[ComfyProgressEvent], Awaitable[None]], run_id: str) -> GeneratedVideo:
-        return await dispatcher.text_to_video.run_and_wait(payload.to_request(), run_id, report)
+        generated = await dispatcher.text_to_video.run_and_wait(video_request, run_id, report)
+        return await dispatcher.voice.attach(generated, voice_request, report)
 
     return {"job_id": dispatcher.schedule(background_tasks, job), "status": "queued"}
 
@@ -366,14 +398,18 @@ async def generation_websocket(websocket: WebSocket) -> None:
 
                     job = image_job
                 else:
-                    video_request = GenerationPayload.model_validate(raw_payload).to_request()
+                    video_payload = GenerationPayload.model_validate(raw_payload)
+                    video_request = video_payload.to_request()
+                    voice_request = video_payload.voice.to_request()
 
                     async def video_job(
                         report: Callable[[ComfyProgressEvent], Awaitable[None]],
                         run_id: str,
                         request: VideoGenerationRequest = video_request,
+                        voice: VoiceRequest = voice_request,
                     ) -> GeneratedVideo:
-                        return await dispatcher.text_to_video.run_and_wait(request, run_id, report)
+                        generated = await dispatcher.text_to_video.run_and_wait(request, run_id, report)
+                        return await dispatcher.voice.attach(generated, voice, report)
 
                     job = video_job
             except (ValidationError, ValueError) as error:

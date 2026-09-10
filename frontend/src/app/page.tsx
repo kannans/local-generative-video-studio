@@ -4,7 +4,7 @@ import { FormEvent, useEffect, useRef, useState } from "react";
 import { Ban, ChevronDown, Clapperboard, History, Images, ImagePlus, ListX, Menu, Plus, Send, SlidersHorizontal, Sparkles, Trash2, Video, X } from "lucide-react";
 import { ImageViewer } from "@/app/components/ImageViewer";
 import { VideoViewer } from "@/components/player/VideoViewer";
-import { ImageStyle, useVideoSocket } from "@/hooks/useVideoSocket";
+import { ImageStyle, VoiceGender, VoiceModel, VoiceSettings, VoiceStatus, defaultVoiceSettings, fetchVoiceStatus, useVideoSocket } from "@/hooks/useVideoSocket";
 import { AspectRatio, useStudioStore } from "@/lib/store";
 
 const prompts = ["A silver tide cuts through black sand", "A sunlit train crossing a foggy valley", "A tiny botanical world growing on a desk"];
@@ -15,6 +15,7 @@ type GenerationSettings = { model: VideoModel; width: number; height: number; fr
 type ImageSettings = { quality: ImageQuality; width: number; height: number; steps: number; seed: number };
 const defaultGenerationSettings: GenerationSettings = { model: "wan-2.1", width: 512, height: 288, frames: 49, steps: 12, cfg: 5.0, fps: 16, seed: 73 };
 const defaultImageSettings: ImageSettings = { quality: "standard", width: 1024, height: 576, steps: 4, seed: 73 };
+const defaultVoice: VoiceSettings = defaultVoiceSettings;
 
 function alignImageDimension(value: number) {
   return Math.max(64, value - (value % 16));
@@ -42,6 +43,8 @@ export default function Home() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [generationSettings, setGenerationSettings] = useState(defaultGenerationSettings);
   const [imageSettings, setImageSettings] = useState(defaultImageSettings);
+  const [voiceSettings, setVoiceSettings] = useState(defaultVoice);
+  const [voiceStatus, setVoiceStatus] = useState<VoiceStatus | null>(null);
   const [queueAction, setQueueAction] = useState<"cancel" | "clear-queue" | null>(null);
   const { sessions, currentSessionId, messages, createSession, clearSessions, addMessage, setCurrentSession } = useStudioStore();
   const { connection, controlGeneration, isGenerating, sendGeneration } = useVideoSocket();
@@ -50,6 +53,14 @@ export default function Home() {
 
   useEffect(() => {
     void useStudioStore.persist.rehydrate();
+    void fetchVoiceStatus().then((status) => {
+      setVoiceStatus(status);
+      setVoiceSettings((current) => (
+        current.model === "off" && status.available.includes(status.default)
+          ? { ...current, model: status.default }
+          : current
+      ));
+    }).catch(() => setVoiceStatus({ available: ["off"], optional: ["qwen-base"], default: "off", references: { female: false, male: false }, install_hint: "Voice status is unavailable until the backend is online." }));
   }, []);
 
   function updateSetting(name: Exclude<keyof GenerationSettings, "model">, value: number) {
@@ -74,6 +85,22 @@ export default function Home() {
     setGenerationSettings((current) => ({ ...current, model, steps: model === "ltx-video" ? 8 : 12, cfg: model === "ltx-video" ? 1 : 5 }));
   }
 
+  function voiceEnabled(model: VoiceModel) {
+    if (model === "off") return true;
+    return Boolean(voiceStatus?.available.includes(model));
+  }
+
+  function selectVoice(model: VoiceModel) {
+    if (!voiceEnabled(model)) return;
+    setVoiceSettings((current) => ({ ...current, model }));
+  }
+
+  function voiceSummary() {
+    if (voiceSettings.model === "off") return "silent";
+    if (voiceSettings.model === "kokoro") return `Voice · Kokoro · ${voiceSettings.gender}`;
+    return `Voice · Natural ${voiceSettings.gender}`;
+  }
+
   function submit(event: FormEvent) {
     event.preventDefault();
     const value = prompt.trim();
@@ -82,7 +109,7 @@ export default function Home() {
     if (mode === "image") {
       sendGeneration({ generation_type: "image", prompt: value, style: imageStyle, aspect_ratio: ratio, width: alignImageDimension(imageSettings.width), height: alignImageDimension(imageSettings.height), steps: imageSettings.steps, seed: imageSettings.seed }, imageStyle === "gif" ? "not calibrated" : "about 1 min");
     } else {
-      sendGeneration({ generation_type: "video", prompt: value, aspect_ratio: ratio === "1:1" ? "16:9" : ratio, quality: "draft", ...generationSettings, reference_name: file?.name }, renderEstimate);
+      sendGeneration({ generation_type: "video", prompt: value, aspect_ratio: ratio === "1:1" ? "16:9" : ratio, quality: "draft", ...generationSettings, voice: voiceSettings, reference_name: file?.name }, renderEstimate);
     }
     setPrompt("");
     setFile(null);
@@ -147,6 +174,22 @@ export default function Home() {
               <label>Seed<input type="number" min="0" value={generationSettings.seed} onChange={(event) => updateSetting("seed", Number(event.target.value))} /></label>
             </div>
             <div className="settings-estimate"><span>Estimated render</span><strong>{generationSettings.model === "ltx-video" ? renderEstimate : `about ${renderEstimate}`}</strong><small>{clipDuration}s output · {generationSettings.model === "ltx-video" ? "calibrate after first run" : "M4 Pro benchmark"}</small></div>
+            <p className="label">VOICE</p>
+            <div className="model-switch triple" role="group" aria-label="Voice model">
+              <button type="button" className={voiceSettings.model === "off" ? "selected" : ""} onClick={() => selectVoice("off")}>Off</button>
+              <button type="button" className={voiceSettings.model === "kokoro" ? "selected" : ""} disabled={!voiceEnabled("kokoro")} title={voiceEnabled("kokoro") ? "Kokoro 82M · Fast male/female presets" : voiceStatus?.install_hint ?? "Install mlx-audio for Kokoro"} onClick={() => selectVoice("kokoro")}>Fast · Kokoro</button>
+              <button type="button" className={voiceSettings.model === "qwen-base" ? "selected" : ""} disabled={!voiceEnabled("qwen-base")} title={voiceEnabled("qwen-base") ? "Clone the male or female reference WAV" : "Install Qwen3-TTS Base and add reference WAVs. See README Voice."} onClick={() => selectVoice("qwen-base")}>Natural · Reference</button>
+            </div>
+            {voiceSettings.model !== "off" && <>
+              <div className="model-switch" role="group" aria-label="Voice gender">
+                <button type="button" className={voiceSettings.gender === "female" ? "selected" : ""} onClick={() => setVoiceSettings((current) => ({ ...current, gender: "female" as VoiceGender }))}>Female</button>
+                <button type="button" className={voiceSettings.gender === "male" ? "selected" : ""} onClick={() => setVoiceSettings((current) => ({ ...current, gender: "male" as VoiceGender }))}>Male</button>
+              </div>
+              <div className="settings-grid">
+                <label className="settings-span">Voice script<textarea value={voiceSettings.script} onChange={(event) => setVoiceSettings((current) => ({ ...current, script: event.target.value }))} placeholder="Leave blank to narrate the video prompt. Example: Dawn on the black sand. The tide draws a silver line." /></label>
+              </div>
+              <p className="settings-note">{voiceSettings.model === "kokoro" ? "Fast uses Kokoro presets af_heart (female) and am_adam (male)." : voiceStatus?.references[voiceSettings.gender] ? `Natural clones backend/storage/voices/${voiceSettings.gender}_reference.wav after the video finishes.` : `Add ${voiceSettings.gender}_reference.wav to backend/storage/voices/ before Natural will render.`}</p>
+            </>}
           </> : <>
             <div className="model-switch" role="group" aria-label="Image quality">
               <button className={imageSettings.quality === "draft" ? "selected" : ""} onClick={() => selectImageQuality("draft")}>Draft</button>
@@ -161,7 +204,7 @@ export default function Home() {
             </div>
             <div className="settings-estimate"><span>Image profile</span><strong>{imageStyle === "gif" ? "512x288 GIF profile" : `${imageSettings.width}x${imageSettings.height} · ${imageSettings.steps} steps`}</strong><small>{imageStyle === "gif" ? "LTX-Video 13B · 49 frames · 12 fps" : "FLUX.1 Schnell · MPS benchmark"}</small></div>
           </>}
-          <div className="settings-footer"><button onClick={() => mode === "video" ? setGenerationSettings(defaultGenerationSettings) : setImageSettings(defaultImageSettings)}>Reset defaults</button><button className="apply-settings" onClick={() => setSettingsOpen(false)}>Done</button></div>
+          <div className="settings-footer"><button onClick={() => { if (mode === "video") { setGenerationSettings(defaultGenerationSettings); setVoiceSettings({ ...defaultVoice, model: voiceStatus?.available.includes("kokoro") ? "kokoro" : "off" }); } else setImageSettings(defaultImageSettings); }}>Reset defaults</button><button className="apply-settings" onClick={() => setSettingsOpen(false)}>Done</button></div>
         </section>
       </div>}
       <div className="messages">
@@ -171,7 +214,7 @@ export default function Home() {
       <form onSubmit={submit} className="composer">
         {file && <div className="file"><ImagePlus size={13} />{file.name}<button type="button" onClick={() => setFile(null)} aria-label="Remove reference image"><X size={13} /></button></div>}
         <textarea ref={ref} rows={1} value={prompt} onChange={(event) => { setPrompt(event.target.value); event.target.style.height = "auto"; event.target.style.height = `${Math.min(event.target.scrollHeight, 120)}px`; }} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) submit(event); }} placeholder="Describe the next shot..." />
-        <p className="render-summary">{mode === "image" ? `${imageStyle === "gif" ? "Animated GIF · LTX-Video 13B" : `Image · FLUX.1 Schnell · ${imageStyle}`} · ${ratio} · ${imageStyle === "gif" ? "512×288" : `${imageSettings.width}×${imageSettings.height} · ${imageSettings.steps} steps`}` : `${generationSettings.model === "ltx-video" ? "LTX-Video 13B" : "Wan 2.1"} · ${generationSettings.width}×${generationSettings.height} · ${generationSettings.frames} frames · ${generationSettings.steps} steps · ${generationSettings.model === "ltx-video" ? renderEstimate : `about ${renderEstimate}`}`}</p>
+        <p className="render-summary">{mode === "image" ? `${imageStyle === "gif" ? "Animated GIF · LTX-Video 13B" : `Image · FLUX.1 Schnell · ${imageStyle}`} · ${ratio} · ${imageStyle === "gif" ? "512×288" : `${imageSettings.width}×${imageSettings.height} · ${imageSettings.steps} steps`}` : `${generationSettings.model === "ltx-video" ? "LTX-Video 13B" : "Wan 2.1"} · ${generationSettings.width}×${generationSettings.height} · ${generationSettings.frames} frames · ${generationSettings.steps} steps · ${voiceSummary()} · ${generationSettings.model === "ltx-video" ? renderEstimate : `about ${renderEstimate}`}`}</p>
         <div><div className="generation-mode" role="group" aria-label="Generation type"><button type="button" className={mode === "image" ? "selected" : ""} onClick={() => selectMode("image")} title="Generate image"><Images size={15} />Image</button><button type="button" className={mode === "video" ? "selected" : ""} onClick={() => selectMode("video")} title="Generate video"><Video size={15} />Video</button></div>{mode === "image" ? <label className="style-select">{imageStyle === "3d" ? "3D" : imageStyle[0].toUpperCase() + imageStyle.slice(1)}<ChevronDown size={13} /><select value={imageStyle} onChange={(event) => setImageStyle(event.target.value as ImageStyle)}><option value="photo">Photo</option><option value="3d">3D render</option><option value="graphic">Graphic</option><option value="art">Art</option><option value="gif">Animated GIF</option></select></label> : <label><ImagePlus size={16} /><span>Upload Reference Image</span><input type="file" accept="image/*" onChange={(event) => setFile(event.target.files?.[0] ?? null)} /></label>}<label className="ratio">{ratio}<ChevronDown size={13} /><select value={ratio} onChange={(event) => selectRatio(event.target.value as AspectRatio)}>{mode === "image" && <option>1:1</option>}<option>16:9</option><option>9:16</option></select></label><button className="send" disabled={!prompt.trim() || isGenerating} aria-label="Send"><Send size={16} /></button></div>
       </form>
     </section>

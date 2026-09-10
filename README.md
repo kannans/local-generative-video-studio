@@ -12,6 +12,7 @@ serves generated media from the local export directory.
 - Photo, 3D render, graphic, and art image styles
 - Animated GIF generation through LTX-Video followed by FFmpeg palette encoding
 - Live ComfyUI progress, cancellation, queue clearing, MP4/PNG/GIF downloads
+- Optional post-video voiceover: Kokoro Fast now, Qwen reference clone when installed
 - Apple MPS detection and local export/latent storage
 
 ## Requirements
@@ -336,6 +337,68 @@ Video supports the existing Wan 2.1 and LTX-Video 13B workflows. LTX requires
 width and height divisible by 32 and a frame count of `8n + 1`. The tested
 small profile is 512x288 with 49 frames. Portrait output swaps the dimensions.
 
+### Voice
+
+Video exports are silent unless **Studio settings → Voice** is enabled. Voice
+runs **after** the MP4, never beside Wan or LTX, and muxes with FFmpeg.
+
+| Setting | Engine | When it is enabled |
+| --- | --- | --- |
+| Off | none | Always |
+| Fast · Kokoro | Kokoro 82M (`af_heart` / `am_adam`) | `mlx-audio` is installed |
+| Natural · Reference | Qwen3-TTS 1.7B Base clone | Qwen weights are cached **and** a gender-matched WAV exists |
+
+Gender is Female or Male. Leave **Voice script** blank to narrate the video
+prompt, or type a short line.
+
+Install Fast (Kokoro) now:
+
+```sh
+cd /Users/kannan.s/projects/AIML/local-video-platform
+uv add mlx-audio
+uv run python -m mlx_audio.tts.generate \
+  --model mlx-community/Kokoro-82M-bf16 \
+  --text "A silver tide cuts through black sand." \
+  --voice af_heart
+```
+
+Restart FastAPI. `GET /health` (or `GET /voice`) should list `kokoro` under
+`voice.available`. The first Fast render downloads Kokoro if it is not cached.
+
+Install Natural later (reference male/female):
+
+```sh
+uv run python - <<'PY'
+from mlx_audio.tts.utils import load_model
+load_model("mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit")
+print("Qwen3-TTS Base cached")
+PY
+```
+
+Record two clean, consented 3–8 second reads and save them as:
+
+```text
+backend/storage/voices/female_reference.wav
+backend/storage/voices/female_reference.txt
+backend/storage/voices/male_reference.wav
+backend/storage/voices/male_reference.txt
+```
+
+The `.txt` file must contain the exact words spoken in the WAV. Example line for
+both files: `The tide draws a silver line across the black sand at dawn.`
+If the `.txt` is omitted, that example line is used as the clone transcript.
+Restart FastAPI so Natural · Reference enables. Switching Fast to Natural
+unloads Kokoro and loads Qwen; only one TTS model stays in memory.
+
+Examples:
+
+| Mix | Settings | Result |
+| --- | --- | --- |
+| Silent Wan draft | Voice Off | Existing silent MP4 |
+| Fast female | Wan or LTX + Fast · Kokoro + Female | Kokoro `af_heart` over the clip |
+| Fast male, custom line | Fast · Kokoro + Male, script `Dawn on the black sand.` | Kokoro `am_adam` |
+| Natural female | Natural · Reference + Female, after Qwen + WAV install | Cloned from `female_reference.wav` |
+
 ### Still image
 
 Select **Image**, choose `1:1`, `16:9`, or `9:16`, then choose Photo, 3D
@@ -560,7 +623,9 @@ size, and restart ComfyUI.
 
 ```text
 backend/                 FastAPI routes, ComfyUI client, and pipelines
-backend/storage/         exports, latents, logs, and runtime PID files
+backend/pipeline/voice.py  Kokoro Fast TTS and gated Qwen reference cloning
+backend/storage/         exports, latents, logs, runtime PID files, and voice WAVs
+backend/storage/voices/  male/female reference clips for Natural voice
 frontend/                Next.js studio and WebSocket client
 scripts/setup_env.sh     project dependency and MPS setup
 scripts/start_server.sh  managed ComfyUI, frontend, and FastAPI startup

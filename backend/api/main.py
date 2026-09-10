@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.api.routes import dispatcher, router
 from backend.config import settings
+from backend.pipeline.voice import voice_status
 
 
 def mps_is_available() -> bool:
@@ -36,7 +37,7 @@ app = FastAPI(
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -49,6 +50,7 @@ app.mount("/exports", StaticFiles(directory=settings.exports_dir), name="exports
 async def health() -> dict[str, object]:
     """Return service, runtime, accelerator, and storage information."""
     disk = shutil.disk_usage(settings.project_root)
+    status = voice_status()
     return {
         "status": "ok",
         "timestamp": datetime.now(UTC).isoformat(),
@@ -65,6 +67,14 @@ async def health() -> dict[str, object]:
             "exports": str(settings.exports_dir),
             "disk_free_bytes": disk.free,
             "disk_total_bytes": disk.total,
+            "voices": str(settings.voices_dir),
+        },
+        "voice": {
+            "available": list(status.available),
+            "optional": list(status.optional),
+            "default": status.default,
+            "references": status.references,
+            "install_hint": status.install_hint,
         },
         "video": {
             "resolution": settings.resolution,

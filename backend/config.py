@@ -35,6 +35,10 @@ class Settings(BaseSettings):
         default=PROJECT_ROOT / "backend" / "storage" / "exports",
         alias="EXPORTS_DIR",
     )
+    voices_dir: Path = Field(
+        default=PROJECT_ROOT / "backend" / "storage" / "voices",
+        alias="VOICES_DIR",
+    )
     video_width: int = Field(default=746, alias="VIDEO_WIDTH", ge=1)
     video_height: int = Field(default=420, alias="VIDEO_HEIGHT", ge=1)
     frame_rate: int = Field(default=24, alias="FRAME_RATE", ge=1)
@@ -63,6 +67,7 @@ class Settings(BaseSettings):
             self.temp_frames_dir,
             self.latents_dir,
             self.exports_dir,
+            self.voices_dir,
         )
 
 

@@ -5,6 +5,10 @@ import { resolveMediaUrl, resolveVideoUrl, useStudioStore } from "@/lib/store";
 
 type ConnectionState = "connecting" | "connected" | "disconnected";
 export type ImageStyle = "photo" | "3d" | "graphic" | "art" | "gif";
+export type VoiceModel = "off" | "kokoro" | "qwen-base";
+export type VoiceGender = "female" | "male";
+export type VoiceSettings = { model: VoiceModel; gender: VoiceGender; script: string };
+export type VoiceStatus = { available: string[]; optional: string[]; default: VoiceModel; references: { female: boolean; male: boolean }; install_hint: string; voices_dir?: string };
 type VideoGenerationRequest = {
   generation_type: "video";
   prompt: string;
@@ -19,11 +23,19 @@ type VideoGenerationRequest = {
   fps: number;
   seed: number;
   reference_name?: string;
+  voice: VoiceSettings;
 };
 type ImageGenerationRequest = { generation_type: "image"; prompt: string; style: ImageStyle; aspect_ratio: "1:1" | "16:9" | "9:16"; width: number; height: number; steps: number; seed: number };
 type GenerationRequest = VideoGenerationRequest | ImageGenerationRequest;
 type SocketEvent = { type?: string; status?: string; progress?: number; message?: string; node?: string; preview_url?: string; image_url?: string; video_url?: string; mp4_url?: string };
 const apiUrl = "http://localhost:8000";
+export const defaultVoiceSettings: VoiceSettings = { model: "off", gender: "female", script: "" };
+
+export async function fetchVoiceStatus(): Promise<VoiceStatus> {
+  const response = await fetch(`${apiUrl}/voice`);
+  if (!response.ok) throw new Error("Could not load voice engines");
+  return response.json() as Promise<VoiceStatus>;
+}
 
 export function useVideoSocket(url = "ws://localhost:8000/ws/generation") {
   const socket = useRef<WebSocket | null>(null);
